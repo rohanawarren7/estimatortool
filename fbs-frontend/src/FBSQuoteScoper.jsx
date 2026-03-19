@@ -9,13 +9,14 @@ const FBS_SECRET      = import.meta.env.VITE_FBS_SECRET;
 
 // localStorage key namespace
 const LS = {
-  rates:        "fbs:rates",
-  sitePrelims:  "fbs:sitePrelims",
-  overhead:     "fbs:overhead",
-  profit:       "fbs:profit",
-  cisDeduction: "fbs:cisDeduction",
-  history:      "fbs:history",
-  syncKey:      "fbs:syncKey",
+  rates:            "fbs:rates",
+  sitePrelims:      "fbs:sitePrelims",
+  overhead:         "fbs:overhead",
+  profit:           "fbs:profit",
+  cisDeduction:     "fbs:cisDeduction",
+  history:          "fbs:history",
+  syncKey:          "fbs:syncKey",
+  videoSegmentMins: "fbs:videoSegmentMins",
 };
 
 function generateSyncKey() {
@@ -184,9 +185,9 @@ function resizeImage(file, maxDim = 768) {
 function adaptiveFrameCount(durationSecs) {
   if (durationSecs <= 10)  return Math.min(10, Math.ceil(durationSecs));
   if (durationSecs <= 60)  return 16;
-  if (durationSecs <= 180) return 30;
-  if (durationSecs <= 600) return 50;
-  return 60;
+  if (durationSecs <= 180) return 20;   // reduced: 30 seeks on a long video stalls browsers
+  if (durationSecs <= 600) return 30;
+  return 40;
 }
 
 function captureFrame(video, maxDim) {
@@ -210,19 +211,49 @@ function captureFrame(video, maxDim) {
   });
 }
 
-function extractVideoFrames(file, maxDim = 512) {
+function seekWithTimeout(video, t, timeoutMs = 12000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`Seek timeout at ${t.toFixed(1)}s`)), timeoutMs);
+    video.onseeked = () => { clearTimeout(timer); resolve(); };
+    video.currentTime = t;
+  });
+}
+
+function getVideoDuration(file) {
+  return new Promise((resolve, reject) => {
+    const v = document.createElement("video");
+    v.preload = "metadata";
+    const url = URL.createObjectURL(file);
+    v.onloadedmetadata = () => { URL.revokeObjectURL(url); resolve(v.duration); };
+    v.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Could not probe video duration")); };
+    v.src = url;
+  });
+}
+
+function formatSegTime(secs) {
+  const m = Math.floor(secs / 60);
+  const s = Math.floor(secs % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+// startSecs / endSecs: when provided, extract frames only from that time range (for segmented mode)
+function extractVideoFrames(file, maxDim = 512, onProgress, startSecs = null, endSecs = null) {
   return new Promise((resolve, reject) => {
     const video = document.createElement("video");
     video.muted = true;
     video.playsInline = true;
+    video.preload = "auto";
     const objectUrl = URL.createObjectURL(file);
     video.src = objectUrl;
 
     video.onloadedmetadata = async () => {
       const duration = video.duration;
-      const count = adaptiveFrameCount(duration);
-      const start = Math.min(2, duration * 0.05);
-      const end   = Math.max(start + 0.1, duration - Math.min(2, duration * 0.05));
+      // When range is provided, use it directly. Only apply the intro/outro buffer for the natural endpoints.
+      const start = startSecs !== null ? startSecs
+        : Math.min(2, duration * 0.05);
+      const end   = endSecs !== null   ? endSecs
+        : Math.max(start + 0.1, duration - Math.min(2, duration * 0.05));
+      const count = adaptiveFrameCount(end - start);
       const timestamps = Array.from({ length: count }, (_, i) =>
         count === 1 ? start : start + (i / (count - 1)) * (end - start)
       );
@@ -231,6 +262,7 @@ function extractVideoFrames(file, maxDim = 512) {
       const useRVFC = "requestVideoFrameCallback" in HTMLVideoElement.prototype;
 
       for (let i = 0; i < timestamps.length; i++) {
+        onProgress?.(i + 1, count);
         if (useRVFC) {
           await new Promise(res => {
             video.requestVideoFrameCallback(async () => {
@@ -244,7 +276,12 @@ function extractVideoFrames(file, maxDim = 512) {
             video.currentTime = timestamps[i];
           });
         } else {
-          await new Promise(res => { video.onseeked = res; video.currentTime = timestamps[i]; });
+          try {
+            await seekWithTimeout(video, timestamps[i]);
+          } catch {
+            // If seek times out, skip this frame and continue
+            continue;
+          }
           const { b64, url } = await captureFrame(video, maxDim);
           frames.push({
             name: `${file.name} · frame ${i + 1}/${count}`,
@@ -307,44 +344,61 @@ async function extractPdfPages(file, maxPages = 10, maxDim = 2000, quality = 0.8
   return { frames, pageCount };
 }
 
+// Extract audio via captureStream() + MediaRecorder at 8× playback speed.
+// Avoids loading the entire video file as an ArrayBuffer — works on files of any size.
+// 3-min video → ~22s real extraction time. Whisper handles time-compressed speech fine.
+// Falls back gracefully on Safari (no captureStream support) with a clear error.
 async function extractAudioB64(file, maxSecs = 300) {
-  const arrayBuffer = await file.arrayBuffer();
-  const audioCtx = new AudioContext();
-  const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-  await audioCtx.close();
+  return new Promise((resolve, reject) => {
+    const video = document.createElement("video");
+    video.src         = URL.createObjectURL(file);
+    video.muted       = false;
+    video.volume      = 0;      // silent to user, audio still captured in stream
+    video.playbackRate = 8;     // 8× speed: 3-min video takes ~22s real time
 
-  const targetRate  = 16000;
-  const numSamples  = Math.ceil(Math.min(audioBuffer.duration, maxSecs) * targetRate);
-  const offCtx      = new OfflineAudioContext(1, numSamples, targetRate);
-  const src         = offCtx.createBufferSource();
-  src.buffer        = audioBuffer;
-  src.connect(offCtx.destination);
-  src.start(0);
-  const rendered = await offCtx.startRendering();
-  const samples  = rendered.getChannelData(0);
+    video.onerror = () => reject(new Error("Could not load video for audio extraction"));
 
-  const wavBuf = new ArrayBuffer(44 + samples.length * 2);
-  const v      = new DataView(wavBuf);
-  const ws     = (off, str) => { for (let i = 0; i < str.length; i++) v.setUint8(off + i, str.charCodeAt(i)); };
-  ws(0, "RIFF"); v.setUint32(4, 36 + samples.length * 2, true); ws(8, "WAVE");
-  ws(12, "fmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
-  v.setUint16(22, 1, true); v.setUint32(24, targetRate, true);
-  v.setUint32(28, targetRate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
-  ws(36, "data"); v.setUint32(40, samples.length * 2, true);
-  let off = 44;
-  for (const s of samples) {
-    const clamped = Math.max(-1, Math.min(1, s));
-    v.setInt16(off, Math.round(clamped * (clamped < 0 ? 32768 : 32767)), true);
-    off += 2;
-  }
+    video.onloadedmetadata = () => {
+      if (typeof video.captureStream !== "function") {
+        // Safari does not support captureStream — skip audio gracefully
+        reject(new Error("VIDEO_TOO_LARGE_FOR_AUDIO:captureStream unsupported"));
+        return;
+      }
 
-  const bytes = new Uint8Array(wavBuf);
-  let binary  = "";
-  const chunk = 8192;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  }
-  return btoa(binary);
+      let stream, recorder;
+      try {
+        stream   = video.captureStream();
+        recorder = new MediaRecorder(stream);
+      } catch (e) {
+        reject(new Error("VIDEO_TOO_LARGE_FOR_AUDIO:MediaRecorder failed"));
+        return;
+      }
+
+      const chunks = [];
+      recorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+      recorder.onstop = () => {
+        const blob   = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+        const reader = new FileReader();
+        reader.onload  = () => resolve(reader.result.split(",")[1]);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+        video.src = "";   // free memory
+      };
+
+      // Real-time duration at 8× to cover maxSecs of video content
+      const realMs = Math.min(video.duration, maxSecs) / 8 * 1000;
+
+      video.play()
+        .then(() => {
+          recorder.start();
+          setTimeout(() => {
+            if (recorder.state !== "inactive") recorder.stop();
+            video.pause();
+          }, realMs + 500); // small buffer so recorder captures the tail
+        })
+        .catch(reject);
+    };
+  });
 }
 
 function fmt(n) {
@@ -429,7 +483,10 @@ export default function FBSQuoteScoper() {
   const [pendingDeleteId, setPendingDeleteId]         = useState(null);
   const [pendingDeleteLineIndex, setPendingDeleteLineIndex] = useState(null);
   const [jobSummary, setJobSummary]               = useState("");
+  const [videoSegmentMins, setVideoSegmentMins]   = useState(() => loadLS(LS.videoSegmentMins, 0));
   const [videoProcessing, setVideoProcessing]     = useState(false);
+  const [videoProgressLabel, setVideoProgressLabel] = useState("");
+  const [describeSegProgress, setDescribeSegProgress] = useState(null); // { cur, total } or null
   const [pdfProcessing, setPdfProcessing]         = useState(false);
   const [pdfTruncWarnings, setPdfTruncWarnings]   = useState([]);
   const [pendingClear, setPendingClear]           = useState(false);
@@ -456,8 +513,9 @@ export default function FBSQuoteScoper() {
   useEffect(() => { try { localStorage.setItem(LS.overhead,    JSON.stringify(overhead));    } catch {} }, [overhead]);
   useEffect(() => { try { localStorage.setItem(LS.profit,      JSON.stringify(profit));      } catch {} }, [profit]);
   useEffect(() => { try { localStorage.setItem(LS.cisDeduction,JSON.stringify(cisDeduction));} catch {} }, [cisDeduction]);
-  useEffect(() => { try { localStorage.setItem(LS.history,     JSON.stringify(history));     } catch {} }, [history]);
-  useEffect(() => { try { localStorage.setItem(LS.syncKey,     JSON.stringify(syncKey));     } catch {} }, [syncKey]);
+  useEffect(() => { try { localStorage.setItem(LS.history,          JSON.stringify(history));          } catch {} }, [history]);
+  useEffect(() => { try { localStorage.setItem(LS.syncKey,          JSON.stringify(syncKey));          } catch {} }, [syncKey]);
+  useEffect(() => { try { localStorage.setItem(LS.videoSegmentMins, JSON.stringify(videoSegmentMins)); } catch {} }, [videoSegmentMins]);
 
   // Load remote history on mount (non-blocking)
   useEffect(() => {
@@ -510,13 +568,53 @@ export default function FBSQuoteScoper() {
 
     if (videos.length) {
       setVideoProcessing(true);
+      setVideoProgressLabel("");
       try {
         for (const vf of videos) {
-          const [frames, audioB64] = await Promise.all([
-            extractVideoFrames(vf),
-            extractAudioB64(vf).catch(() => null),
-          ]);
-          setImages(prev => [...prev, ...frames]);
+          // Probe duration to plan segments
+          let duration = 9999;
+          try { duration = await getVideoDuration(vf); } catch {}
+
+          const segLenSecs = videoSegmentMins > 0 ? videoSegmentMins * 60 : duration;
+          const numSegs    = Math.max(1, Math.ceil(duration / segLenSecs));
+
+          for (let seg = 0; seg < numSegs; seg++) {
+            const segStart = seg * segLenSecs;
+            const segEnd   = Math.min((seg + 1) * segLenSecs, duration);
+            // Pass explicit range only for interior segments; let natural buffer apply at ends
+            const startArg = seg === 0             ? null : segStart;
+            const endArg   = seg === numSegs - 1   ? null : segEnd;
+            const segLabel = numSegs > 1
+              ? `${formatSegTime(segStart)}–${formatSegTime(segEnd)}`
+              : null;
+
+            const frames = await extractVideoFrames(vf, 512, (done, total) => {
+              setVideoProgressLabel(
+                numSegs > 1 ? `seg ${seg + 1}/${numSegs} · frame ${done}/${total}`
+                            : `frame ${done}/${total}`
+              );
+            }, startArg, endArg);
+
+            // Tag frames with segment info for the per-segment Gemini calls
+            const taggedFrames = segLabel
+              ? frames.map(f => ({ ...f, segmentId: seg, segmentLabel: segLabel }))
+              : frames;
+
+            setImages(prev => [...prev, ...taggedFrames]);
+          }
+
+          // Audio: always extract from the full video (captureStream handles any duration)
+          let audioB64 = null;
+          try {
+            setVideoProgressLabel("extracting audio…");
+            audioB64 = await extractAudioB64(vf);
+          } catch (e) {
+            if (e.message?.startsWith("VIDEO_TOO_LARGE_FOR_AUDIO:")) {
+              const detail = e.message.split(":")[1];
+              setVideoProgressLabel(`audio skipped (${detail} — frames only)`);
+              await new Promise(r => setTimeout(r, 1800));
+            }
+          }
           if (audioB64) {
             setAudioClips(prev => [
               ...prev.filter(c => c.videoName !== vf.name),
@@ -526,6 +624,7 @@ export default function FBSQuoteScoper() {
         }
       } finally {
         setVideoProcessing(false);
+        setVideoProgressLabel("");
       }
     }
 
@@ -635,7 +734,7 @@ export default function FBSQuoteScoper() {
     setStage("idle"); setError("");
     setJobSummary(""); setJobDescription("");
     setRefinementText(""); setRefinementOpen(false);
-    setDescribeTruncated(false);
+    setDescribeTruncated(false); setDescribeSegProgress(null);
     setPendingClear(false);
     setTab("upload");
   };
@@ -692,11 +791,44 @@ export default function FBSQuoteScoper() {
       }
 
       // Stage 2 — Gemini 2.0 Flash: frames → rich text description
+      // If frames carry segmentId, each segment gets its own Gemini call; descriptions are combined.
       setStage("describing");
-      const { description, truncated } = await callBackend("/api/describe", {
-        images: images.map(img => ({ b64: img.b64, type: img.type })),
-        ...(jobDescription.trim() && { jobDescription: jobDescription.trim() }),
-      });
+      setDescribeSegProgress(null);
+
+      let description;
+      let truncated = false;
+
+      const segIds = [...new Set(images.map(img => img.segmentId))]
+        .filter(id => id !== null && id !== undefined)
+        .sort((a, b) => a - b);
+      const hasSegments = segIds.length > 1;
+
+      if (hasSegments) {
+        const parts = [];
+        setDescribeSegProgress({ cur: 0, total: segIds.length });
+        for (let i = 0; i < segIds.length; i++) {
+          const segId     = segIds[i];
+          const segImages = images.filter(img => img.segmentId === segId);
+          const segLabel  = segImages[0]?.segmentLabel || `Segment ${segId + 1}`;
+          setDescribeSegProgress({ cur: i + 1, total: segIds.length });
+          const result = await callBackend("/api/describe", {
+            images: segImages.map(img => ({ b64: img.b64, type: img.type })),
+            ...(jobDescription.trim() && { jobDescription: jobDescription.trim() }),
+          });
+          parts.push(`=== SEGMENT ${segId + 1}/${segIds.length} (${segLabel}) ===\n${result.description}`);
+          if (result.truncated) truncated = true;
+        }
+        description = parts.join("\n\n");
+        setDescribeSegProgress(null);
+      } else {
+        const result = await callBackend("/api/describe", {
+          images: images.map(img => ({ b64: img.b64, type: img.type })),
+          ...(jobDescription.trim() && { jobDescription: jobDescription.trim() }),
+        });
+        description = result.description;
+        truncated   = result.truncated;
+      }
+
       setDescriptionData(description);
       if (truncated) setDescribeTruncated(true);
 
@@ -939,7 +1071,7 @@ export default function FBSQuoteScoper() {
                 <input ref={fileRef} type="file" multiple accept="image/*,video/*,application/pdf,.pdf" style={{ display: "none" }}
                   onChange={e => handleFiles(Array.from(e.target.files))} />
                 {videoProcessing ? (
-                  <Spinner label="Extracting video frames + audio…" />
+                  <Spinner label={videoProgressLabel ? `Extracting video — ${videoProgressLabel}` : "Extracting video frames…"} />
                 ) : pdfProcessing ? (
                   <Spinner label="Rasterising PDF pages…" />
                 ) : (
@@ -948,6 +1080,9 @@ export default function FBSQuoteScoper() {
                     <div style={{ color: C.muted, fontSize: 14 }}>Drop photos, videos or PDF drawings here, or click to browse</div>
                     <div style={{ color: C.subtle, fontSize: 11, marginTop: 6, fontFamily: "'DM Mono'" }}>
                       JPG · PNG · WEBP · MP4 · MOV · PDF · multiple angles recommended
+                    </div>
+                    <div style={{ color: C.subtle, fontSize: 10, marginTop: 8, fontFamily: "'DM Mono'", lineHeight: 1.5 }}>
+                      iPhone tip: Settings → Camera → Formats → <strong style={{ color: C.muted }}>Most Compatible</strong> to record in H.264 (works in all browsers)
                     </div>
                   </>
                 )}
@@ -1076,6 +1211,30 @@ export default function FBSQuoteScoper() {
                 </div>
               </div>
 
+              {/* Video Processing */}
+              <div style={{ marginBottom: 28 }}>
+                <div style={{ fontSize: 11, color: C.muted, fontFamily: "'DM Mono'",
+                  textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
+                  Video Processing
+                </div>
+                <div style={{ fontSize: 10, color: C.subtle, fontFamily: "'DM Mono'", marginBottom: 10 }}>
+                  Split long site walkthroughs into segments. Each segment is sent to Gemini separately — better coverage across a long video without hitting the request size limit.
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <label style={{ fontSize: 12, color: C.muted, fontFamily: "'DM Mono'", flexShrink: 0 }}>
+                    Split videos into segments:
+                  </label>
+                  <select value={videoSegmentMins} onChange={e => setVideoSegmentMins(+e.target.value)}
+                    style={{ background: "#0F1117", border: `1px solid ${C.subtle}`, borderRadius: 4,
+                      padding: "6px 10px", color: C.text, fontFamily: "'DM Mono'", fontSize: 12, cursor: "pointer" }}>
+                    <option value={0}>Off — full video (default)</option>
+                    <option value={2}>Every 2 min</option>
+                    <option value={3}>Every 3 min</option>
+                    <option value={5}>Every 5 min</option>
+                  </select>
+                </div>
+              </div>
+
               {/* Financial model — 3 fields + CIS */}
               <div style={{ display: "flex", gap: 16, marginBottom: 24, flexWrap: "wrap" }}>
                 {[
@@ -1168,7 +1327,11 @@ export default function FBSQuoteScoper() {
               )}
               {stage === "describing" && (
                 <div style={{ padding: "40px 0", textAlign: "center" }}>
-                  <Spinner label={`Stage ${hasAudio ? "2" : "1"}/${totalStages} · Gemini 2.0 Flash analysing all frames…`} />
+                  <Spinner label={
+                    describeSegProgress
+                      ? `Stage ${hasAudio ? "2" : "1"}/${totalStages} · Gemini analysing segment ${describeSegProgress.cur}/${describeSegProgress.total}…`
+                      : `Stage ${hasAudio ? "2" : "1"}/${totalStages} · Gemini 2.0 Flash analysing all frames…`
+                  } />
                 </div>
               )}
               {stage === "scoping" && (
@@ -1188,7 +1351,7 @@ export default function FBSQuoteScoper() {
                 <div style={{ background: "#D9770622", border: "1px solid #D9770644",
                   borderRadius: 5, padding: "8px 14px", marginBottom: 12,
                   fontSize: 12, color: "#F59E0B", fontFamily: "'DM Mono'" }}>
-                  ⚠ Site description was truncated — complex scenes with many rooms may have reduced coverage. Consider splitting into fewer photos per run.
+                  ⚠ Site description was truncated — complex scenes with many rooms may have reduced coverage. For long videos, try enabling video segmentation in Rates &amp; Margin settings.
                 </div>
               )}
 
