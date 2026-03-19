@@ -15,7 +15,22 @@ const LS = {
   profit:       "fbs:profit",
   cisDeduction: "fbs:cisDeduction",
   history:      "fbs:history",
+  syncKey:      "fbs:syncKey",
 };
+
+function generateSyncKey() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0;
+    return (c === "x" ? r : (r & 0x3 | 0x8)).toString(16);
+  });
+}
+
+function mergeHistories(local, remote) {
+  const map = new Map();
+  [...local, ...remote].forEach(e => { if (e?.id) map.set(e.id, e); });
+  return [...map.values()].sort((a, b) => new Date(b.date) - new Date(a.date));
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  RATE CARD — cost rates: what FBS pays per unit
@@ -424,6 +439,15 @@ export default function FBSQuoteScoper() {
   const [transcriptData, setTranscriptData]       = useState(null);
   const [descriptionData, setDescriptionData]     = useState(null);
   const [describeTruncated, setDescribeTruncated] = useState(false);
+  const [syncKey, setSyncKey]                     = useState(() => {
+    const stored = loadLS(LS.syncKey, null);
+    if (stored) return stored;
+    const newKey = generateSyncKey();
+    try { localStorage.setItem(LS.syncKey, JSON.stringify(newKey)); } catch {}
+    return newKey;
+  });
+  const [syncStatus, setSyncStatus]               = useState("");   // "", "syncing", "synced", "error"
+  const [syncKeyInput, setSyncKeyInput]           = useState("");   // for entering a key from another device
   const fileRef = useRef();
 
   // Persist settings to localStorage
@@ -433,6 +457,37 @@ export default function FBSQuoteScoper() {
   useEffect(() => { try { localStorage.setItem(LS.profit,      JSON.stringify(profit));      } catch {} }, [profit]);
   useEffect(() => { try { localStorage.setItem(LS.cisDeduction,JSON.stringify(cisDeduction));} catch {} }, [cisDeduction]);
   useEffect(() => { try { localStorage.setItem(LS.history,     JSON.stringify(history));     } catch {} }, [history]);
+  useEffect(() => { try { localStorage.setItem(LS.syncKey,     JSON.stringify(syncKey));     } catch {} }, [syncKey]);
+
+  // Load remote history on mount (non-blocking)
+  useEffect(() => {
+    let cancelled = false;
+    async function loadRemote() {
+      try {
+        const res = await fetch(`${VERCEL_BASE_URL}/api/history?syncKey=${encodeURIComponent(syncKey)}`, {
+          headers: { "x-fbs-secret": FBS_SECRET },
+        });
+        if (!res.ok || cancelled) return;
+        const { history: remote } = await res.json();
+        if (!cancelled && Array.isArray(remote) && remote.length > 0) {
+          setHistory(prev => mergeHistories(prev, remote));
+        }
+      } catch {}
+    }
+    loadRemote();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const pushHistoryRemote = useCallback(async (updatedHistory, key) => {
+    try {
+      await fetch(`${VERCEL_BASE_URL}/api/history`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json", "x-fbs-secret": FBS_SECRET },
+        body:    JSON.stringify({ syncKey: key, history: updatedHistory }),
+      });
+    } catch {}
+  }, []);
 
   const handleFiles = useCallback(async (files) => {
     const photos = [];
@@ -546,10 +601,12 @@ export default function FBSQuoteScoper() {
       const newHistory = [entry, ...prev].slice(0, 100);
       // Guard: if serialised history exceeds ~3.5MB, strip descriptionData from older entries
       const approxSize = JSON.stringify(newHistory).length;
-      if (approxSize > 3_500_000) {
-        return newHistory.map((e, i) => i < 5 ? e : { ...e, descriptionData: null });
-      }
-      return newHistory;
+      const finalHistory = approxSize > 3_500_000
+        ? newHistory.map((e, i) => i < 5 ? e : { ...e, descriptionData: null })
+        : newHistory;
+      // Push to remote (non-blocking — fire and forget)
+      pushHistoryRemote(finalHistory, syncKey);
+      return finalHistory;
     });
   };
 
@@ -955,6 +1012,70 @@ export default function FBSQuoteScoper() {
           {/* ── TAB: RATES ─────────────────────────────────────────────────── */}
           {tab === "rates" && (
             <div style={{ animation: "slideIn 0.2s ease" }}>
+
+              {/* Device sync key */}
+              <div style={{ marginBottom: 24, padding: "14px 16px",
+                background: "#0F1117", border: `1px solid ${C.border}`, borderRadius: 6 }}>
+                <div style={{ fontSize: 11, color: C.muted, fontFamily: "'DM Mono'",
+                  textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
+                  Device Sync Key
+                </div>
+                <div style={{ fontSize: 10, color: C.subtle, fontFamily: "'DM Mono'", marginBottom: 10 }}>
+                  Your quote history syncs to the cloud under this key. Copy it to another device to share your history.
+                </div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
+                  <code style={{ flex: 1, background: C.card, border: `1px solid ${C.subtle}`,
+                    borderRadius: 4, padding: "6px 10px", fontSize: 11, fontFamily: "'DM Mono'",
+                    color: C.amber, letterSpacing: "0.04em", wordBreak: "break-all" }}>
+                    {syncKey}
+                  </code>
+                  <button onClick={() => { navigator.clipboard.writeText(syncKey); setSyncStatus("copied"); setTimeout(() => setSyncStatus(""), 2000); }}
+                    style={{ background: "transparent", border: `1px solid ${C.subtle}`, borderRadius: 4,
+                      padding: "6px 14px", color: syncStatus === "copied" ? C.green : C.muted,
+                      fontFamily: "'DM Mono'", fontSize: 11, cursor: "pointer", whiteSpace: "nowrap" }}>
+                    {syncStatus === "copied" ? "✓ Copied" : "Copy"}
+                  </button>
+                </div>
+                <div style={{ fontSize: 10, color: C.subtle, fontFamily: "'DM Mono'", marginBottom: 6 }}>
+                  Enter a sync key from another device to load its history:
+                </div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <input value={syncKeyInput} onChange={e => setSyncKeyInput(e.target.value)}
+                    placeholder="paste sync key here…"
+                    style={{ flex: 1, background: C.card, border: `1px solid ${C.subtle}`, borderRadius: 4,
+                      padding: "6px 10px", color: C.text, fontSize: 11, fontFamily: "'DM Mono'" }} />
+                  <button disabled={syncStatus === "syncing" || syncKeyInput.length < 10}
+                    onClick={async () => {
+                      const key = syncKeyInput.trim();
+                      if (key.length < 10) return;
+                      setSyncStatus("syncing");
+                      try {
+                        const res = await fetch(`${VERCEL_BASE_URL}/api/history?syncKey=${encodeURIComponent(key)}`, {
+                          headers: { "x-fbs-secret": FBS_SECRET },
+                        });
+                        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                        const { history: remote } = await res.json();
+                        if (Array.isArray(remote)) {
+                          setHistory(prev => mergeHistories(prev, remote));
+                          setSyncKey(key);
+                          setSyncKeyInput("");
+                          setSyncStatus("synced");
+                          setTimeout(() => setSyncStatus(""), 3000);
+                        }
+                      } catch {
+                        setSyncStatus("error");
+                        setTimeout(() => setSyncStatus(""), 3000);
+                      }
+                    }}
+                    style={{ background: syncStatus === "syncing" ? C.subtle : C.amber,
+                      border: "none", borderRadius: 4, padding: "6px 14px",
+                      color: "#000", fontFamily: "'DM Mono'", fontSize: 11,
+                      cursor: syncStatus === "syncing" ? "not-allowed" : "pointer", whiteSpace: "nowrap" }}>
+                    {syncStatus === "syncing" ? "Loading…" : syncStatus === "synced" ? "✓ Synced" : syncStatus === "error" ? "Error" : "Load"}
+                  </button>
+                </div>
+              </div>
+
               {/* Financial model — 3 fields + CIS */}
               <div style={{ display: "flex", gap: 16, marginBottom: 24, flexWrap: "wrap" }}>
                 {[
