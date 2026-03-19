@@ -57,7 +57,7 @@ module.exports = async function handler(req, res) {
     return res.status(401).json({ error: "Unauthorised" });
   }
 
-  const { description, jobDescription, transcript, complexity } = req.body;
+  const { description, jobDescription, transcript, complexity, refinements } = req.body;
   if (!description) {
     return res.status(400).json({ error: "description (site inspection report) is required" });
   }
@@ -71,6 +71,14 @@ module.exports = async function handler(req, res) {
       `JOB COMPLEXITY (confirmed by estimator): "${complexity}"\n` +
       `Calibrate all quantity estimates to this tier. For "like-for-like swap", ` +
       `use minimum competent hours. Do not inflate scope beyond what this tier requires.`
+    );
+  }
+
+  if (refinements?.trim()) {
+    contextParts.push(
+      `ESTIMATOR REFINEMENTS / RESPONSES TO SITE QUERIES:\n${refinements.trim()}\n` +
+      `Use this information to adjust quantities and scope. ` +
+      `Override or confirm previous assumptions where addressed.`
     );
   }
 

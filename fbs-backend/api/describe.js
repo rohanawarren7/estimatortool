@@ -19,6 +19,14 @@ For each distinct room or area visible across the images, describe:
 
 If frames appear sequential (similar angles, slight movement), treat them as a continuous walkthrough rather than separate rooms.
 
+If any images are pages from architectural or construction drawings (floor plans, elevations, sections, M&E drawings, or schedules of works), extract:
+- Room names, dimensions (width × length × height), and floor areas from the drawings
+- All annotations, dimension strings, and labels visible in the drawing
+- Materials, finishes, or specifications noted in legends or schedules
+- Trade-specific layouts: electrical point locations, plumbing/drainage routes, structural elements, HVAC routes, fire protection zones
+- Any schedule of works, finishes schedule, or specification notes visible
+Reconcile drawing information with site photos where both are present.
+
 Write as a professional site inspection report in clear prose, grouped by area. Be specific about materials, approximate dimensions, and areas. Flag anything with limited visibility or requiring site verification.`;
 
 module.exports = async function handler(req, res) {

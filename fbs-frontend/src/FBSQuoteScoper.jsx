@@ -246,6 +246,52 @@ function extractVideoFrames(file, maxDim = 512) {
   });
 }
 
+async function extractPdfPages(file, maxPages = 10, maxDim = 2000, quality = 0.85) {
+  const pdfjsLib = await import("pdfjs-dist");
+  // CDN worker — avoids Vite worker config complexity
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
+
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  const pageCount = pdf.numPages;
+  const pagesToProcess = Math.min(pageCount, maxPages);
+
+  const frames = [];
+  for (let pageNum = 1; pageNum <= pagesToProcess; pageNum++) {
+    const page     = await pdf.getPage(pageNum);
+    const viewport = page.getViewport({ scale: 1.5 });
+
+    const canvas   = document.createElement("canvas");
+    canvas.width   = viewport.width;
+    canvas.height  = viewport.height;
+    await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+
+    // Downscale to maxDim if larger — preserves annotation legibility
+    const scale    = Math.min(maxDim / canvas.width, maxDim / canvas.height, 1);
+    const out      = document.createElement("canvas");
+    out.width      = Math.round(canvas.width  * scale);
+    out.height     = Math.round(canvas.height * scale);
+    out.getContext("2d").drawImage(canvas, 0, 0, out.width, out.height);
+
+    const dataUrl  = out.toDataURL("image/jpeg", quality);
+    const b64      = dataUrl.split(",")[1];
+    canvas.width   = 0;  // free memory
+    out.width      = 0;
+
+    frames.push({
+      name:       `${file.name} · page ${pageNum}/${pageCount}`,
+      b64, url:   dataUrl, type: "image/jpeg",
+      source:     "pdf",
+      pdfName:    file.name,
+      pageNumber: pageNum,
+      pageCount,
+    });
+  }
+
+  return { frames, pageCount };
+}
+
 async function extractAudioB64(file, maxSecs = 60) {
   const arrayBuffer = await file.arrayBuffer();
   const audioCtx = new AudioContext();
@@ -368,7 +414,13 @@ export default function FBSQuoteScoper() {
   const [expandedHistoryId, setExpandedHistoryId] = useState(null);
   const [pendingDeleteId, setPendingDeleteId]         = useState(null);
   const [pendingDeleteLineIndex, setPendingDeleteLineIndex] = useState(null);
+  const [jobSummary, setJobSummary]               = useState("");
   const [videoProcessing, setVideoProcessing]     = useState(false);
+  const [pdfProcessing, setPdfProcessing]         = useState(false);
+  const [pdfTruncWarnings, setPdfTruncWarnings]   = useState([]);
+  const [pendingClear, setPendingClear]           = useState(false);
+  const [refinementText, setRefinementText]       = useState("");
+  const [refinementOpen, setRefinementOpen]       = useState(false);
   const [audioClips, setAudioClips]               = useState([]);
   const [transcriptData, setTranscriptData]       = useState(null);
   const [descriptionData, setDescriptionData]     = useState(null);
@@ -385,9 +437,11 @@ export default function FBSQuoteScoper() {
   const handleFiles = useCallback(async (files) => {
     const photos = [];
     const videos = [];
+    const pdfs   = [];
     for (const f of files) {
-      if (f.type.startsWith("image/"))      photos.push(f);
-      else if (f.type.startsWith("video/")) videos.push(f);
+      if (f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf")) pdfs.push(f);
+      else if (f.type.startsWith("image/"))      photos.push(f);
+      else if (f.type.startsWith("video/"))      videos.push(f);
     }
 
     if (photos.length) {
@@ -417,6 +471,24 @@ export default function FBSQuoteScoper() {
         }
       } finally {
         setVideoProcessing(false);
+      }
+    }
+
+    if (pdfs.length) {
+      setPdfProcessing(true);
+      try {
+        for (const pf of pdfs) {
+          const { frames, pageCount } = await extractPdfPages(pf);
+          setImages(prev => [...prev, ...frames]);
+          if (pageCount > 10) {
+            setPdfTruncWarnings(prev => [
+              ...prev.filter(w => w.name !== pf.name),
+              { name: pf.name, total: pageCount },
+            ]);
+          }
+        }
+      } finally {
+        setPdfProcessing(false);
       }
     }
   }, []);
@@ -461,14 +533,16 @@ export default function FBSQuoteScoper() {
   const saveToHistory = () => {
     if (!quoteData || !scopeData) return;
     const entry = {
-      id:           `${jobRef}-${Date.now()}`,
+      id:              `${jobRef}-${Date.now()}`,
       jobRef,
-      date:         new Date().toISOString(),
-      total:        quoteData.total,
-      complexity:   quoteData.complexity,
-      scopeSummary: scopeData.scope_summary,
+      jobSummary,
+      date:            new Date().toISOString(),
+      total:           quoteData.total,
+      complexity:      quoteData.complexity,
+      scopeSummary:    scopeData.scope_summary,
       quoteData,
       scopeData,
+      descriptionData,
     };
     setHistory(prev => [entry, ...prev].slice(0, 100));
   };
@@ -478,13 +552,58 @@ export default function FBSQuoteScoper() {
     setPendingDeleteId(null);
   };
 
-  const loadHistoryEntry = (entry) => {
+  const loadHistoryEntry = (entry, openRefinement = false) => {
     setJobRef(entry.jobRef);
+    setJobSummary(entry.jobSummary || "");
     setScopeData(entry.scopeData);
     setQuoteData(entry.quoteData);
+    setDescriptionData(entry.descriptionData || null);
     setStage("done");
     setTab("quote");
     setExpandedHistoryId(null);
+    setRefinementText("");
+    setRefinementOpen(openRefinement);
+  };
+
+  const clearAll = () => {
+    setImages([]); setAudioClips([]); setPdfTruncWarnings([]);
+    setTranscriptData(null); setDescriptionData(null);
+    setScopeData(null); setQuoteData(null);
+    setStage("idle"); setError("");
+    setJobSummary(""); setJobDescription("");
+    setRefinementText(""); setRefinementOpen(false);
+    setPendingClear(false);
+    setTab("upload");
+  };
+
+  const buildProxyDescription = (sd) =>
+    `[Re-scope from prior estimate]\n${sd.scope_summary}\n\nPrevious scope items:\n` +
+    sd.items.map(i => `- ${i.trade}: ${i.quantity} ${i.unit} — ${i.description}`).join("\n");
+
+  const runRefinement = async () => {
+    if (!scopeData) return;
+    setRefinementOpen(false);
+    setScopeData(null); setQuoteData(null); setError("");
+    setStage("scoping");
+    try {
+      const effectiveDescription = descriptionData || buildProxyDescription(scopeData);
+      const scope = await callBackend("/api/scope", {
+        description: effectiveDescription,
+        complexity,
+        ...(jobDescription.trim() && { jobDescription: jobDescription.trim() }),
+        ...(transcriptData         && { transcript: transcriptData }),
+        refinements: refinementText,
+      });
+      setScopeData(scope);
+      setJobSummary(prev => prev.trim() ? prev
+        : (scope.scope_summary?.split(/\s+/).slice(0, 6).join(" ") ?? ""));
+      const quote = priceScope(scope.items, rates, complexity, sitePrelims, overhead, profit, cisDeduction);
+      setQuoteData(quote);
+      setStage("done");
+    } catch (e) {
+      setError(e.message);
+      setStage("error");
+    }
   };
 
   const runPipeline = async () => {
@@ -525,6 +644,8 @@ export default function FBSQuoteScoper() {
         ...(transcript            && { transcript }),
       });
       setScopeData(scope);
+      setJobSummary(prev => prev.trim() ? prev
+        : (scope.scope_summary?.split(/\s+/).slice(0, 6).join(" ") ?? ""));
 
       // Stage 4 — Deterministic pricing (no API call)
       const quote = priceScope(scope.items, rates, complexity, sitePrelims, overhead, profit, cisDeduction);
@@ -545,7 +666,7 @@ export default function FBSQuoteScoper() {
     if (quoteMode === "detailed") {
       lines = [
         `FALLOW BUILDING SERVICES — QUOTE ESTIMATE`,
-        `Ref: ${jobRef}${q.complexity ? ` · ${q.complexity}` : ""}`,
+        `Ref: ${jobRef}${jobSummary ? ` — ${jobSummary}` : ""}${q.complexity ? ` · ${q.complexity}` : ""}`,
         ``,
         `TRADE BREAKDOWN`,
         `${"─".repeat(90)}`,
@@ -665,18 +786,40 @@ export default function FBSQuoteScoper() {
 
       <div style={{ maxWidth: 960, margin: "0 auto", padding: "24px 20px" }}>
 
-        {/* JOB REF + RUN */}
-        <div style={{ display: "flex", gap: 12, marginBottom: 20, alignItems: "center" }}>
-          <div style={{ fontSize: 11, fontFamily: "'DM Mono'", color: C.muted }}>JOB REF</div>
+        {/* JOB REF + SUMMARY + CLEAR + RUN */}
+        <div style={{ display: "flex", gap: 10, marginBottom: 20, alignItems: "center", flexWrap: "wrap" }}>
+          <div style={{ fontSize: 11, fontFamily: "'DM Mono'", color: C.muted, whiteSpace: "nowrap" }}>JOB REF</div>
           <input value={jobRef} onChange={e => setJobRef(e.target.value)}
-            style={{ width: 180, background: C.card, border: `1px solid ${C.subtle}`,
+            style={{ width: 160, background: C.card, border: `1px solid ${C.subtle}`,
               borderRadius: 5, padding: "8px 12px", color: C.text, fontSize: 13,
               fontFamily: "'DM Mono'" }} />
-          <div style={{ flex: 1 }} />
+          <input value={jobSummary} onChange={e => setJobSummary(e.target.value)}
+            placeholder="client / job summary…"
+            style={{ flex: 1, minWidth: 140, background: C.card, border: `1px solid ${C.subtle}`,
+              borderRadius: 5, padding: "8px 12px", color: C.text, fontSize: 12,
+              fontFamily: "'DM Mono'" }} />
+          {/* Clear All */}
+          {pendingClear ? (
+            <>
+              <button onClick={clearAll}
+                style={{ background: C.red, border: "none", borderRadius: 5, padding: "8px 14px",
+                  color: "#fff", fontFamily: "'DM Mono'", fontSize: 11, cursor: "pointer",
+                  letterSpacing: "0.06em" }}>CONFIRM CLEAR</button>
+              <button onClick={() => setPendingClear(false)}
+                style={{ background: "transparent", border: `1px solid ${C.subtle}`, borderRadius: 5,
+                  padding: "8px 12px", color: C.muted, fontFamily: "'DM Mono'",
+                  fontSize: 11, cursor: "pointer" }}>Cancel</button>
+            </>
+          ) : (
+            <button onClick={() => setPendingClear(true)}
+              style={{ background: "transparent", border: `1px solid ${C.subtle}`, borderRadius: 5,
+                padding: "8px 12px", color: C.muted, fontFamily: "'DM Mono'",
+                fontSize: 11, cursor: "pointer" }}>✕ Clear</button>
+          )}
           <button onClick={runPipeline} disabled={busy}
             style={{ background: busy ? C.subtle : C.amber, color: "#000", border: "none",
               borderRadius: 6, padding: "10px 28px", fontFamily: "'Bebas Neue'", fontSize: 16,
-              letterSpacing: "0.08em", cursor: busy ? "not-allowed" : "pointer" }}>
+              letterSpacing: "0.08em", cursor: busy ? "not-allowed" : "pointer", whiteSpace: "nowrap" }}>
             {stage === "transcribing" ? "Transcribing…" :
              stage === "describing"   ? "Analysing…"    :
              stage === "scoping"      ? "Scoping…"      : "▶  Run Scope + Price"}
@@ -757,16 +900,18 @@ export default function FBSQuoteScoper() {
                 style={{ border: `2px dashed ${videoProcessing ? C.amber : C.subtle}`, borderRadius: 8,
                   padding: "40px 20px", textAlign: "center", cursor: "pointer", marginBottom: 20,
                   transition: "border-color 0.2s" }}>
-                <input ref={fileRef} type="file" multiple accept="image/*,video/*" style={{ display: "none" }}
+                <input ref={fileRef} type="file" multiple accept="image/*,video/*,application/pdf,.pdf" style={{ display: "none" }}
                   onChange={e => handleFiles(Array.from(e.target.files))} />
                 {videoProcessing ? (
                   <Spinner label="Extracting video frames + audio…" />
+                ) : pdfProcessing ? (
+                  <Spinner label="Rasterising PDF pages…" />
                 ) : (
                   <>
                     <div style={{ fontSize: 32, marginBottom: 10 }}>📸</div>
-                    <div style={{ color: C.muted, fontSize: 14 }}>Drop photos or videos here, or click to browse</div>
+                    <div style={{ color: C.muted, fontSize: 14 }}>Drop photos, videos or PDF drawings here, or click to browse</div>
                     <div style={{ color: C.subtle, fontSize: 11, marginTop: 6, fontFamily: "'DM Mono'" }}>
-                      JPG · PNG · WEBP · MP4 · MOV · multiple angles recommended
+                      JPG · PNG · WEBP · MP4 · MOV · PDF · multiple angles recommended
                     </div>
                   </>
                 )}
@@ -783,18 +928,34 @@ export default function FBSQuoteScoper() {
                 </div>
               )}
 
+              {/* PDF truncation warnings */}
+              {pdfTruncWarnings.map(w => (
+                <div key={w.name} style={{ marginBottom: 12, padding: "8px 14px", background: "#3B82F611",
+                  border: `1px solid #3B82F633`, borderRadius: 6, fontSize: 12,
+                  color: C.muted, fontFamily: "'DM Mono'" }}>
+                  ⚠ {w.name} has {w.total} pages — first 10 shown. For large drawing sets, upload individual sheets.
+                </div>
+              ))}
+
               {/* Media grid */}
               {images.length > 0 && (
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 10 }}>
                   {images.map((img, i) => (
                     <div key={i} style={{ position: "relative", borderRadius: 6, overflow: "hidden",
-                      border: `1px solid ${img.source === "video" ? "#F59E0B44" : C.border}` }}>
+                      border: `1px solid ${img.source === "video" ? "#F59E0B44" : img.source === "pdf" ? "#3B82F644" : C.border}` }}>
                       <img src={img.url} alt={img.name}
                         style={{ width: "100%", height: 100, objectFit: "cover", display: "block" }} />
                       {img.source === "video" && (
                         <div style={{ position: "absolute", top: 4, left: 4, background: "#00000099",
                           borderRadius: 3, padding: "2px 5px", fontSize: 9,
                           color: C.amber, fontFamily: "'DM Mono'" }}>▶ frame</div>
+                      )}
+                      {img.source === "pdf" && (
+                        <div style={{ position: "absolute", top: 4, left: 4, background: "#00000099",
+                          borderRadius: 3, padding: "2px 5px", fontSize: 9,
+                          color: "#60A5FA", fontFamily: "'DM Mono'" }}>
+                          📄 {img.pageNumber}/{img.pageCount}
+                        </div>
                       )}
                       <button onClick={() => removeImage(i)}
                         style={{ position: "absolute", top: 4, right: 4, background: "#00000099",
@@ -803,7 +964,7 @@ export default function FBSQuoteScoper() {
                       <div style={{ padding: "4px 6px", fontSize: 10, color: C.muted,
                         fontFamily: "'DM Mono'", background: C.card,
                         overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {img.name}
+                        {img.source === "pdf" ? img.pdfName : img.name}
                       </div>
                     </div>
                   ))}
@@ -978,6 +1139,64 @@ export default function FBSQuoteScoper() {
                 </div>
               )}
 
+              {/* ── Refinement panel ── */}
+              {scopeData && stage === "done" && (
+                <div style={{ marginBottom: 16 }}>
+                  {!refinementOpen ? (
+                    <button onClick={() => setRefinementOpen(true)}
+                      style={{ background: "transparent", border: `1px solid ${C.subtle}`,
+                        borderRadius: 5, padding: "6px 14px", color: C.muted,
+                        fontFamily: "'DM Mono'", fontSize: 11, cursor: "pointer",
+                        letterSpacing: "0.05em" }}>
+                      ✏ Refine this quote
+                    </button>
+                  ) : (
+                    <div style={{ background: C.card, border: `1px solid ${C.border}`,
+                      borderRadius: 8, padding: "16px 18px" }}>
+                      <div style={{ fontSize: 11, fontFamily: "'DM Mono'", color: C.muted,
+                        textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10 }}>
+                        Refinements &amp; Adjustments
+                      </div>
+                      <div style={{ fontSize: 12, color: C.muted, marginBottom: 10, lineHeight: 1.6 }}>
+                        Respond to site queries, correct assumptions, or add context not visible in the photos.
+                        {!descriptionData && (
+                          <span style={{ color: "#D97706", display: "block", marginTop: 4 }}>
+                            ⚠ No original description found — re-scope will use prior items as context (lower fidelity).
+                          </span>
+                        )}
+                      </div>
+                      <textarea
+                        value={refinementText}
+                        onChange={e => setRefinementText(e.target.value)}
+                        rows={5}
+                        placeholder={scopeData.site_queries?.length
+                          ? `Address these site queries:\n${scopeData.site_queries.map((q, i) => `${i + 1}. ${q}`).join("\n")}`
+                          : "Add corrections, additional context, or scope adjustments…"}
+                        style={{ width: "100%", background: "#0F1117", border: `1px solid ${C.subtle}`,
+                          borderRadius: 5, padding: "10px 12px", color: C.text, fontSize: 12,
+                          fontFamily: "'DM Mono'", lineHeight: 1.6, resize: "vertical",
+                          boxSizing: "border-box" }}
+                      />
+                      <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
+                        <button onClick={runRefinement} disabled={!refinementText.trim()}
+                          style={{ background: refinementText.trim() ? C.amber : C.subtle,
+                            border: "none", borderRadius: 5, padding: "8px 18px", color: "#000",
+                            fontFamily: "'Bebas Neue'", fontSize: 14, letterSpacing: "0.08em",
+                            cursor: refinementText.trim() ? "pointer" : "not-allowed" }}>
+                          Re-scope with adjustments
+                        </button>
+                        <button onClick={() => setRefinementOpen(false)}
+                          style={{ background: "transparent", border: `1px solid ${C.subtle}`,
+                            borderRadius: 5, padding: "8px 14px", color: C.muted,
+                            fontFamily: "'DM Mono'", fontSize: 11, cursor: "pointer" }}>
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
               {quoteData && (
                 <div>
                   {/* Quote header bar */}
@@ -985,6 +1204,11 @@ export default function FBSQuoteScoper() {
                     marginBottom: 10, gap: 8, flexWrap: "wrap" }}>
                     <div style={{ fontFamily: "'Bebas Neue'", fontSize: 15, letterSpacing: "0.08em", color: C.amber }}>
                       {jobRef}
+                      {jobSummary && (
+                        <span style={{ fontSize: 12, color: C.text, fontFamily: "'DM Mono'",
+                          fontWeight: 400, textTransform: "none", letterSpacing: 0,
+                          marginLeft: 10 }}>— {jobSummary}</span>
+                      )}
                       {quoteData.complexity && (
                         <span style={{ fontSize: 12, color: C.muted, fontFamily: "'DM Mono'",
                           fontWeight: 400, textTransform: "none", letterSpacing: 0,
@@ -1387,13 +1611,22 @@ export default function FBSQuoteScoper() {
                           </div>
                         )}
                       </div>
-                      <button onClick={() => loadHistoryEntry(entry)}
-                        style={{ marginTop: 12, background: C.amber, border: "none",
-                          borderRadius: 5, padding: "7px 16px", color: "#000",
-                          fontFamily: "'DM Mono'", fontSize: 11, cursor: "pointer",
-                          letterSpacing: "0.06em", textTransform: "uppercase" }}>
-                        Load into Editor
-                      </button>
+                      <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                        <button onClick={() => loadHistoryEntry(entry)}
+                          style={{ background: C.amber, border: "none",
+                            borderRadius: 5, padding: "7px 16px", color: "#000",
+                            fontFamily: "'DM Mono'", fontSize: 11, cursor: "pointer",
+                            letterSpacing: "0.06em", textTransform: "uppercase" }}>
+                          Load into Editor
+                        </button>
+                        <button onClick={() => loadHistoryEntry(entry, true)}
+                          style={{ background: "transparent", border: `1px solid ${C.subtle}`,
+                            borderRadius: 5, padding: "7px 14px", color: C.muted,
+                            fontFamily: "'DM Mono'", fontSize: 11, cursor: "pointer",
+                            letterSpacing: "0.06em" }}>
+                          ✏ Refine
+                        </button>
+                      </div>
                     </div>
                   )}
                 </div>
