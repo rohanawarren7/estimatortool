@@ -292,7 +292,7 @@ async function extractPdfPages(file, maxPages = 10, maxDim = 2000, quality = 0.8
   return { frames, pageCount };
 }
 
-async function extractAudioB64(file, maxSecs = 60) {
+async function extractAudioB64(file, maxSecs = 300) {
   const arrayBuffer = await file.arrayBuffer();
   const audioCtx = new AudioContext();
   const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
@@ -398,10 +398,9 @@ export default function FBSQuoteScoper() {
   const [images, setImages]                       = useState([]);
   const [rates, setRates]                         = useState(() => migrateRates(loadLS(LS.rates, null)));
   const [sitePrelims, setSitePrelims]             = useState(() => loadLS(LS.sitePrelims, 8));
-  const [overhead, setOverhead]                   = useState(() => loadLS(LS.overhead, 12));
-  const [profit, setProfit]                       = useState(() => loadLS(LS.profit, 20));
+  const [overhead, setOverhead]                   = useState(() => loadLS(LS.overhead, 15));
+  const [profit, setProfit]                       = useState(() => loadLS(LS.profit, 25));
   const [cisDeduction, setCisDeduction]           = useState(() => loadLS(LS.cisDeduction, 20));
-  const [complexity, setComplexity]               = useState("like-for-like swap");
   const [jobRef, setJobRef]                       = useState("FBS-2026-");
   const [jobDescription, setJobDescription]       = useState("");
   const [stage, setStage]                         = useState("idle");
@@ -424,6 +423,7 @@ export default function FBSQuoteScoper() {
   const [audioClips, setAudioClips]               = useState([]);
   const [transcriptData, setTranscriptData]       = useState(null);
   const [descriptionData, setDescriptionData]     = useState(null);
+  const [describeTruncated, setDescribeTruncated] = useState(false);
   const fileRef = useRef();
 
   // Persist settings to localStorage
@@ -513,19 +513,17 @@ export default function FBSQuoteScoper() {
   const deleteLineItem = (i) => {
     if (!quoteData) return;
     const newItems = quoteData.line_items.filter((_, idx) => idx !== i);
-    // Re-price with same settings but without the deleted item's original (pre-multiplied) quantities
-    // Since line_items already have adj quantities, we re-price directly from those
+    // Items already carry complexity-adjusted quantities from the original scope run.
+    // Force "like-for-like swap" (all multipliers = 1.0) so quantities aren't double-multiplied.
     const repriced = priceScope(
       newItems.map(l => ({ ...l, quantity: l.quantity })),
-      rates, quoteData.complexity || complexity,
+      rates, "like-for-like swap",
       quoteData.site_prelims_pct, quoteData.overhead_pct, quoteData.profit_pct,
       quoteData.cis_pct ?? cisDeduction
     );
-    // Multipliers would be re-applied — but since items already carry adj quantities and the
-    // "like-for-like" multiplier is 1.0, passing the items through priceScope with complexity
-    // "like-for-like swap" ensures quantities aren't re-multiplied. We pass items directly.
     setQuoteData({
       ...repriced,
+      complexity: quoteData.complexity,   // restore original AI-assessed complexity label
       // Use already-adjusted items, priced at like-for-like (×1.0) to avoid double-multiplying
     });
   };
@@ -544,7 +542,15 @@ export default function FBSQuoteScoper() {
       scopeData,
       descriptionData,
     };
-    setHistory(prev => [entry, ...prev].slice(0, 100));
+    setHistory(prev => {
+      const newHistory = [entry, ...prev].slice(0, 100);
+      // Guard: if serialised history exceeds ~3.5MB, strip descriptionData from older entries
+      const approxSize = JSON.stringify(newHistory).length;
+      if (approxSize > 3_500_000) {
+        return newHistory.map((e, i) => i < 5 ? e : { ...e, descriptionData: null });
+      }
+      return newHistory;
+    });
   };
 
   const deleteHistoryEntry = (id) => {
@@ -572,6 +578,7 @@ export default function FBSQuoteScoper() {
     setStage("idle"); setError("");
     setJobSummary(""); setJobDescription("");
     setRefinementText(""); setRefinementOpen(false);
+    setDescribeTruncated(false);
     setPendingClear(false);
     setTab("upload");
   };
@@ -589,7 +596,6 @@ export default function FBSQuoteScoper() {
       const effectiveDescription = descriptionData || buildProxyDescription(scopeData);
       const scope = await callBackend("/api/scope", {
         description: effectiveDescription,
-        complexity,
         ...(jobDescription.trim() && { jobDescription: jobDescription.trim() }),
         ...(transcriptData         && { transcript: transcriptData }),
         refinements: refinementText,
@@ -597,7 +603,8 @@ export default function FBSQuoteScoper() {
       setScopeData(scope);
       setJobSummary(prev => prev.trim() ? prev
         : (scope.scope_summary?.split(/\s+/).slice(0, 6).join(" ") ?? ""));
-      const quote = priceScope(scope.items, rates, complexity, sitePrelims, overhead, profit, cisDeduction);
+      const aiComplexity = scope.complexity || "like-for-like swap";
+      const quote = priceScope(scope.items, rates, aiComplexity, sitePrelims, overhead, profit, cisDeduction);
       setQuoteData(quote);
       setStage("done");
     } catch (e) {
@@ -629,17 +636,17 @@ export default function FBSQuoteScoper() {
 
       // Stage 2 — Gemini 2.0 Flash: frames → rich text description
       setStage("describing");
-      const { description } = await callBackend("/api/describe", {
+      const { description, truncated } = await callBackend("/api/describe", {
         images: images.map(img => ({ b64: img.b64, type: img.type })),
         ...(jobDescription.trim() && { jobDescription: jobDescription.trim() }),
       });
       setDescriptionData(description);
+      if (truncated) setDescribeTruncated(true);
 
-      // Stage 3 — Kimi K2.5: text description → quantity takeoff
+      // Stage 3 — Kimi K2.5: text description → quantity takeoff (AI self-assesses complexity)
       setStage("scoping");
       const scope = await callBackend("/api/scope", {
         description,
-        complexity,
         ...(jobDescription.trim() && { jobDescription: jobDescription.trim() }),
         ...(transcript            && { transcript }),
       });
@@ -648,7 +655,8 @@ export default function FBSQuoteScoper() {
         : (scope.scope_summary?.split(/\s+/).slice(0, 6).join(" ") ?? ""));
 
       // Stage 4 — Deterministic pricing (no API call)
-      const quote = priceScope(scope.items, rates, complexity, sitePrelims, overhead, profit, cisDeduction);
+      const aiComplexity = scope.complexity || "like-for-like swap";
+      const quote = priceScope(scope.items, rates, aiComplexity, sitePrelims, overhead, profit, cisDeduction);
       setQuoteData(quote);
       setStage("done");
     } catch (e) {
@@ -739,13 +747,6 @@ export default function FBSQuoteScoper() {
   const hasAudio  = audioClips.length > 0;
   const totalStages = hasAudio ? 3 : 2;
   const videoNames  = [...new Set(images.filter(i => i.source === "video").map(i => i.videoName))];
-
-  const COMPLEXITY_TIERS = [
-    "like-for-like swap",
-    "partial renovation",
-    "full renovation",
-    "new build / extension",
-  ];
 
   return (
     <div style={{ minHeight: "100vh", background: C.bg, color: C.text,
@@ -872,28 +873,6 @@ export default function FBSQuoteScoper() {
                 />
               </div>
 
-              {/* Complexity selector */}
-              <div style={{ marginBottom: 20 }}>
-                <div style={{ fontSize: 11, color: C.muted, fontFamily: "'DM Mono'",
-                  textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8 }}>
-                  Job Complexity
-                </div>
-                <div style={{ display: "flex", gap: 0, border: `1px solid ${C.subtle}`, borderRadius: 5, overflow: "hidden", width: "fit-content" }}>
-                  {COMPLEXITY_TIERS.map(tier => (
-                    <button key={tier} onClick={() => setComplexity(tier)}
-                      style={{ padding: "6px 14px", border: "none",
-                        borderRight: `1px solid ${C.subtle}`,
-                        cursor: "pointer",
-                        background: complexity === tier ? C.amber : "transparent",
-                        color: complexity === tier ? "#000" : C.muted,
-                        fontSize: 11, fontFamily: "'DM Mono'", letterSpacing: "0.05em",
-                        textTransform: "capitalize", whiteSpace: "nowrap" }}>
-                      {tier}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
               {/* Dropzone */}
               <div onDrop={onDrop} onDragOver={e => e.preventDefault()}
                 onClick={() => fileRef.current.click()}
@@ -979,22 +958,28 @@ export default function FBSQuoteScoper() {
               {/* Financial model — 3 fields + CIS */}
               <div style={{ display: "flex", gap: 16, marginBottom: 24, flexWrap: "wrap" }}>
                 {[
-                  { label: "SITE PRELIMS %",      val: sitePrelims, set: setSitePrelims, color: C.text,    hint: "Skip hire, PPE, site visits" },
-                  { label: "COMPANY OVERHEAD %",   val: overhead,    set: setOverhead,    color: C.text,    hint: "Insurance, vehicles, office" },
-                  { label: "NET PROFIT %",          val: profit,      set: setProfit,      color: C.amber,   hint: "Genuine profit margin" },
-                  { label: "CIS DEDUCTION %",       val: cisDeduction,set: setCisDeduction,color: "#9CA3AF", hint: "Informational — withheld from subbies" },
-                ].map(({ label, val, set, color, hint }) => (
+                  { label: "SITE PRELIMS %",      val: sitePrelims, set: setSitePrelims, color: C.text,    hint: "Skip hire, PPE, site visits",               max: 30 },
+                  { label: "COMPANY OVERHEAD %",   val: overhead,    set: setOverhead,    color: C.text,    hint: "Insurance, vehicles, office",               max: 40 },
+                  { label: "NET PROFIT %",          val: profit,      set: setProfit,      color: C.amber,   hint: "Genuine profit margin",                     max: 60 },
+                  { label: "CIS DEDUCTION %",       val: cisDeduction,set: setCisDeduction,color: "#9CA3AF", hint: "Informational — withheld from subbies",     max: 30 },
+                ].map(({ label, val, set, color, hint, max }) => (
                   <div key={label} style={{ flex: "1 1 120px", minWidth: 120 }}>
                     <label style={{ fontSize: 11, color: C.muted, fontFamily: "'DM Mono'",
                       display: "block", marginBottom: 4 }}>{label}</label>
                     <div style={{ fontSize: 10, color: C.subtle, fontFamily: "'DM Mono'", marginBottom: 6 }}>{hint}</div>
-                    <input type="number" value={val} onChange={e => set(+e.target.value)}
+                    <input type="number" min={0} max={max} value={val}
+                      onChange={e => set(Math.max(0, Math.min(max, parseFloat(e.target.value) || 0)))}
                       style={{ width: "100%", background: "#0F1117", border: `1px solid ${C.subtle}`,
                         borderRadius: 5, padding: "8px 12px", color, fontSize: 16,
                         fontFamily: "'DM Mono'", textAlign: "center" }} />
                   </div>
                 ))}
               </div>
+              {(sitePrelims + overhead + profit) > 60 && (
+                <div style={{ color: "#F59E0B", fontSize: 11, fontFamily: "'DM Mono'", marginBottom: 16 }}>
+                  ⚠ Total uplift ({(sitePrelims + overhead + profit).toFixed(0)}%) is unusually high — check figures
+                </div>
+              )}
 
               {/* Rate card */}
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
@@ -1075,6 +1060,14 @@ export default function FBSQuoteScoper() {
                 <div style={{ background: "#DC262611", border: `1px solid #DC262633`,
                   borderRadius: 6, padding: "12px 16px", color: C.red, fontSize: 13, marginBottom: 16 }}>
                   ⚠ {error}
+                </div>
+              )}
+
+              {describeTruncated && (
+                <div style={{ background: "#D9770622", border: "1px solid #D9770644",
+                  borderRadius: 5, padding: "8px 14px", marginBottom: 12,
+                  fontSize: 12, color: "#F59E0B", fontFamily: "'DM Mono'" }}>
+                  ⚠ Site description was truncated — complex scenes with many rooms may have reduced coverage. Consider splitting into fewer photos per run.
                 </div>
               )}
 
@@ -1209,11 +1202,11 @@ export default function FBSQuoteScoper() {
                           fontWeight: 400, textTransform: "none", letterSpacing: 0,
                           marginLeft: 10 }}>— {jobSummary}</span>
                       )}
-                      {quoteData.complexity && (
+                      {(scopeData?.job_type || quoteData.complexity) && (
                         <span style={{ fontSize: 12, color: C.muted, fontFamily: "'DM Mono'",
                           fontWeight: 400, textTransform: "none", letterSpacing: 0,
                           marginLeft: 10 }}>
-                          · {quoteData.complexity}
+                          · {[scopeData?.job_type, quoteData.complexity].filter(Boolean).join(" · ")}
                         </span>
                       )}
                       {" · Quote Output"}

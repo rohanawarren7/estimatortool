@@ -67,7 +67,7 @@ module.exports = async function handler(req, res) {
       },
       body: JSON.stringify({
         model: MODEL,
-        max_tokens: 4000,
+        max_tokens: 8000,
         temperature: 0.3,
         messages: [{
           role: "user",
@@ -86,11 +86,15 @@ module.exports = async function handler(req, res) {
 
     const data = await response.json();
     const description = data.choices?.[0]?.message?.content?.trim() || "";
+    const finishReason = data.choices?.[0]?.finish_reason;
     console.log("Gemini description length:", description.length, "chars");
-    console.log("Finish reason:", data.choices?.[0]?.finish_reason);
-    if (!description) throw new Error(`Empty description from Gemini. finish_reason=${data.choices?.[0]?.finish_reason}`);
+    console.log("Finish reason:", finishReason);
+    if (!description) throw new Error(`Empty description from Gemini. finish_reason=${finishReason}`);
 
-    return res.status(200).json({ description });
+    return res.status(200).json({
+      description,
+      truncated: finishReason === "max_tokens",
+    });
 
   } catch (err) {
     console.error("describe error:", err);

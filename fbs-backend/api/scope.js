@@ -1,12 +1,33 @@
 // api/scope.js — Stage 3: Site description + context → Quantity Takeoff via Kimi K2.5
 // Kimi receives rich text only (no images) — keeps its context free for analysis.
+// Option B: Kimi self-assesses job_type and complexity from visual evidence.
+// Multiplier table in the frontend owns all complexity uplift.
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const MODEL = "moonshotai/kimi-k2.5";
 
+const VALID_TIERS = [
+  "like-for-like swap",
+  "partial renovation",
+  "full renovation",
+  "new build / extension",
+];
+
 const SCOPE_PROMPT = `You are a professional quantity surveyor and construction estimator working for a London-based contractor called Fallow Building Services (FBS).
 
 A site inspection report has been produced from photos and video frames of the job. Use it — along with any job brief and audio transcript provided — to produce a structured quantity takeoff.
+
+COMPLEXITY TIERS — assess from the visual evidence and job brief, then choose exactly one:
+- "like-for-like swap": direct replacement only, same layout, no structural work, minimal new services
+- "partial renovation": some layout changes, moderate services work, cosmetic refurb of part of a property
+- "full renovation": full gut-out, rerouting services, multi-room scope, structural elements likely
+- "new build / extension": all trades from scratch, new structure, full M&E installation
+
+JOB TYPE CATEGORIES — identify the primary work type, choose the closest match:
+Bathroom / ensuite refurb | Kitchen remodel | Bedroom / living room renovation |
+Full flat renovation | Full house renovation | Loft conversion | Extension / side return |
+Commercial office fit-out | Retail / hospitality fit-out | External works / landscaping |
+Structural alteration | New build | Mixed / multi-area works
 
 Rules:
 1. Identify every trade visible or implied across these categories:
@@ -22,13 +43,49 @@ Rules:
 2. For each trade, estimate quantities in the EXACT units specified:
    - Area-based work (plastering, tiling, painting, boarding, screeding, insulation, roofing, flooring, brickwork, suspended ceilings): m²
    - Time-based work (electrical, plumbing, carpentry, demolition, HVAC, groundworks, drainage, steelwork, labour): hours
-3. Calibrate quantities against these London benchmarks. For "like-for-like swap":
-   - Full bathroom strip out: 4–6 hrs demolition
-   - Replumb suite (like-for-like): 8–14 hrs plumbing
-   - Bathroom electrical (no new circuits): 4–8 hrs
-   - Skimming a bathroom (walls + ceiling): 12–18 m²
-   - Painting a bathroom: 12–18 m²
-   Use the lower bound for swap/minor work; scale up only with clear visible evidence.
+3. Estimate BASELINE quantities — the minimum competent hours/areas for a like-for-like swap. Do NOT inflate for complexity; the pricing engine applies complexity multipliers separately. Calibrate against these London benchmarks:
+
+BATHROOM / ENSUITE — "like-for-like swap" baseline:
+  Strip out: 4–6 hrs | Plumbing: 8–14 hrs | Electrical (no new circuits): 4–8 hrs
+  Skim walls + ceiling: 12–18 m² | Tiling (walls): 8–14 m² | Tiling (floor): 3–5 m²
+  Painting: 12–18 m²
+
+BATHROOM — "full renovation" baseline (layout change, wet room conversion etc.):
+  Strip out: 6–10 hrs | Plumbing: 16–28 hrs | Electrical (new circuits): 8–16 hrs
+  Boarding: 10–16 m² | Skimming: 14–22 m² | Tiling: 14–30 m²
+
+KITCHEN — "like-for-like swap" baseline (units replaced, no structural):
+  Strip out: 4–8 hrs | Plumbing: 6–12 hrs | Electrical (2nd fix): 6–10 hrs
+  Carpentry (fit new units): 12–20 hrs | Boarding/skim (if damaged): 10–18 m²
+  Flooring: 8–14 m²
+
+KITCHEN — "partial renovation" baseline (remove wall, extend services):
+  Strip out: 8–16 hrs | Plumbing: 12–24 hrs | Electrical (1st + 2nd fix): 14–24 hrs
+  Structural: 4–12 hrs | Carpentry: 20–36 hrs | Plastering: 14–24 m²
+
+BEDROOM / LIVING ROOM — "partial renovation" baseline:
+  Strip out: 2–4 hrs | Plastering: 20–40 m² | Painting: 30–60 m²
+  Carpentry (skirtings, architrave): 6–12 hrs | Flooring: 12–20 m²
+  Electrical (2nd fix): 4–8 hrs
+
+FULL FLAT (1–2 bed) — "full renovation" baseline:
+  Strip out: 20–40 hrs | Plastering: 80–140 m² | Painting: 100–180 m²
+  Plumbing: 30–50 hrs | Electrical (1st + 2nd fix): 40–70 hrs
+  Tiling: 20–40 m² | Flooring: 30–60 m² | Carpentry: 30–50 hrs
+
+COMMERCIAL OFFICE — "full renovation" baseline:
+  Strip out: 20–60 hrs | Boarding / dry lining: 60–120 m² | Suspended ceilings: 40–100 m²
+  Electrical (1st + 2nd fix): 60–120 hrs | HVAC / ductwork: 30–80 hrs
+  Painting: 80–160 m² | Flooring (LVT): 40–100 m²
+
+LOFT CONVERSION — "new build / extension" baseline:
+  Structural / steelwork: 20–40 hrs | Roofing: 20–40 m²
+  Boarding: 80–160 m² | Insulation: 80–160 m²
+  Electrical (1st + 2nd fix): 40–80 hrs | Plumbing: 20–40 hrs
+  Plastering: 60–100 m² | Carpentry (stairs, dormer): 40–80 hrs
+
+Always scale to actual area/room count visible in images. Use the lower end of each range unless clear evidence warrants higher. For multi-area jobs, sum room-by-room.
+
 3b. Err on the side of inclusion, not omission. If a trade is implied or uncertain, include it with confidence: "low" rather than leaving it out. This produces a transparent provisional sum rather than a missing scope item.
 4. Clearly state any assumptions about dimensions or quantities.
 5. Set confidence: "high" for items clearly visible or explicitly instructed. Set confidence: "low" for items implied, uncertain, or requiring site verification. Do NOT use site_queries to exclude trades — site_queries is for dimension/access questions only. Every identifiable trade scope item belongs in "items".
@@ -36,7 +93,9 @@ Rules:
 
 Respond ONLY in this exact JSON format, no markdown, no preamble:
 {
-  "scope_summary": "One sentence including complexity tier — use one of: [like-for-like swap | partial renovation | full renovation | structural/extension]. Example: 'Like-for-like bathroom suite swap in a small en-suite, existing layout retained.'",
+  "job_type": "Bathroom / ensuite refurb",
+  "complexity": "like-for-like swap",
+  "scope_summary": "One sentence describing the works — e.g. 'Like-for-like bathroom suite swap in a small en-suite, existing layout retained.'",
   "assumptions": ["assumption 1", "assumption 2"],
   "items": [
     { "trade": "Trade Name", "description": "Brief description (≤5 words)", "quantity": 0.0, "unit": "m² or hrs", "confidence": "high" }
@@ -57,22 +116,13 @@ module.exports = async function handler(req, res) {
     return res.status(401).json({ error: "Unauthorised" });
   }
 
-  const { description, jobDescription, transcript, complexity, refinements } = req.body;
+  const { description, jobDescription, transcript, refinements } = req.body;
   if (!description) {
     return res.status(400).json({ error: "description (site inspection report) is required" });
   }
 
   // Build context block — all text, no images
   const contextParts = [];
-
-  // Complexity tier — injected first as a hard constraint
-  if (complexity) {
-    contextParts.push(
-      `JOB COMPLEXITY (confirmed by estimator): "${complexity}"\n` +
-      `Calibrate all quantity estimates to this tier. For "like-for-like swap", ` +
-      `use minimum competent hours. Do not inflate scope beyond what this tier requires.`
-    );
-  }
 
   if (refinements?.trim()) {
     contextParts.push(
@@ -129,6 +179,12 @@ module.exports = async function handler(req, res) {
         ...item,
         confidence: item.confidence || "high",
       }));
+    }
+
+    // Validate and normalise complexity tier — fallback if Kimi returns unexpected value
+    if (!parsed.complexity || !VALID_TIERS.includes(parsed.complexity)) {
+      console.warn("Kimi returned unexpected complexity:", parsed.complexity, "— defaulting to 'like-for-like swap'");
+      parsed.complexity = "like-for-like swap";
     }
 
     return res.status(200).json(parsed);
