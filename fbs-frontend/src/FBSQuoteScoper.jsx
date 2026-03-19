@@ -183,11 +183,11 @@ function resizeImage(file, maxDim = 768) {
 }
 
 function adaptiveFrameCount(durationSecs) {
-  if (durationSecs <= 10)  return Math.min(10, Math.ceil(durationSecs));
-  if (durationSecs <= 60)  return 16;
-  if (durationSecs <= 180) return 20;   // reduced: 30 seeks on a long video stalls browsers
-  if (durationSecs <= 600) return 30;
-  return 40;
+  if (durationSecs <= 10)  return Math.min(15, Math.ceil(durationSecs));
+  if (durationSecs <= 60)  return 24;
+  if (durationSecs <= 180) return 30;
+  if (durationSecs <= 600) return 40;
+  return 50;
 }
 
 function captureFrame(video, maxDim) {
@@ -576,9 +576,9 @@ export default function FBSQuoteScoper() {
           try { duration = await getVideoDuration(vf); } catch {}
 
           // Auto-segment if manually set, or if the video is long/large (avoids Vercel payload limit)
-          const autoSeg = videoSegmentMins === 0 && (duration > 180 || vf.size > 150_000_000);
+          const autoSeg = videoSegmentMins === 0 && (duration > 90 || vf.size > 100_000_000);
           const segLenSecs = videoSegmentMins > 0 ? videoSegmentMins * 60
-            : autoSeg ? 180
+            : autoSeg ? 90
             : duration;
           const numSegs    = Math.max(1, Math.ceil(duration / segLenSecs));
 
