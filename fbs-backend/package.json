@@ -1,0 +1,16 @@
+{
+  "name": "fbs-quote-scoper-backend",
+  "version": "1.0.0",
+  "description": "Fallow Building Services — Kimi K2.5 Quote Scoping API",
+  "private": true,
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

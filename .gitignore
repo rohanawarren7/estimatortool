@@ -1,0 +1,16 @@
+# iCloud Drive conflict copies (e.g. "server 2.js", "FBSQuoteScoper 3.jsx")
+* [0-9].js
+* [0-9].jsx
+* [0-9][0-9].js
+* [0-9][0-9].jsx
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+
+# Env files
+.env
+.env.local
