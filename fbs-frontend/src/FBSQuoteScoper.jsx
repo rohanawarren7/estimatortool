@@ -211,7 +211,7 @@ function captureFrame(video, maxDim) {
   });
 }
 
-function seekWithTimeout(video, t, timeoutMs = 12000) {
+function seekWithTimeout(video, t, timeoutMs = 20000) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`Seek timeout at ${t.toFixed(1)}s`)), timeoutMs);
     video.onseeked = () => { clearTimeout(timer); resolve(); };
@@ -575,7 +575,11 @@ export default function FBSQuoteScoper() {
           let duration = 9999;
           try { duration = await getVideoDuration(vf); } catch {}
 
-          const segLenSecs = videoSegmentMins > 0 ? videoSegmentMins * 60 : duration;
+          // Auto-segment if manually set, or if the video is long/large (avoids Vercel payload limit)
+          const autoSeg = videoSegmentMins === 0 && (duration > 180 || vf.size > 150_000_000);
+          const segLenSecs = videoSegmentMins > 0 ? videoSegmentMins * 60
+            : autoSeg ? 180
+            : duration;
           const numSegs    = Math.max(1, Math.ceil(duration / segLenSecs));
 
           for (let seg = 0; seg < numSegs; seg++) {
@@ -821,12 +825,41 @@ export default function FBSQuoteScoper() {
         description = parts.join("\n\n");
         setDescribeSegProgress(null);
       } else {
-        const result = await callBackend("/api/describe", {
-          images: images.map(img => ({ b64: img.b64, type: img.type })),
-          ...(jobDescription.trim() && { jobDescription: jobDescription.trim() }),
-        });
-        description = result.description;
-        truncated   = result.truncated;
+        // Guard against Vercel's 4.5MB body limit — split into batches if needed
+        const MAX_B64_CHARS = 3_500_000;
+        const allImgs = images.map(img => ({ b64: img.b64, type: img.type }));
+        const batches = [];
+        let batch = [], batchSize = 0;
+        for (const img of allImgs) {
+          if (batchSize + img.b64.length > MAX_B64_CHARS && batch.length > 0) {
+            batches.push(batch); batch = []; batchSize = 0;
+          }
+          batch.push(img); batchSize += img.b64.length;
+        }
+        if (batch.length) batches.push(batch);
+
+        if (batches.length > 1) {
+          const parts = [];
+          setDescribeSegProgress({ cur: 0, total: batches.length });
+          for (let i = 0; i < batches.length; i++) {
+            setDescribeSegProgress({ cur: i + 1, total: batches.length });
+            const result = await callBackend("/api/describe", {
+              images: batches[i],
+              ...(jobDescription.trim() && { jobDescription: jobDescription.trim() }),
+            });
+            parts.push(`=== BATCH ${i + 1}/${batches.length} ===\n${result.description}`);
+            if (result.truncated) truncated = true;
+          }
+          description = parts.join("\n\n");
+          setDescribeSegProgress(null);
+        } else {
+          const result = await callBackend("/api/describe", {
+            images: allImgs,
+            ...(jobDescription.trim() && { jobDescription: jobDescription.trim() }),
+          });
+          description = result.description;
+          truncated   = result.truncated;
+        }
       }
 
       setDescriptionData(description);
