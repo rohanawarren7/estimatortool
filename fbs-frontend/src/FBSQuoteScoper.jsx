@@ -184,10 +184,10 @@ function resizeImage(file, maxDim = 768) {
 
 function adaptiveFrameCount(durationSecs) {
   if (durationSecs <= 10)  return Math.min(15, Math.ceil(durationSecs));
-  if (durationSecs <= 60)  return 30;
-  if (durationSecs <= 180) return 40;
-  if (durationSecs <= 600) return 50;
-  return 60;
+  if (durationSecs <= 60)  return 24;
+  if (durationSecs <= 180) return 24;
+  if (durationSecs <= 600) return 24;
+  return 24;
 }
 
 function captureFrame(video, maxDim) {
