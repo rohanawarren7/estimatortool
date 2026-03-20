@@ -16,6 +16,7 @@ app.all("/api/describe",   require("./api/describe"));
 app.all("/api/scope",      require("./api/scope"));
 app.all("/api/transcribe", require("./api/transcribe"));
 app.all("/api/summarise",  require("./api/summarise"));
+app.all("/api/slack",      require("./api/slack"));
 app.all("/api/history",    require("./api/history"));
 app.all("/api",            require("./api/index"));
 

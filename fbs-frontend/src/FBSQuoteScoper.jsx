@@ -17,6 +17,7 @@ const LS = {
   history:          "fbs:history",
   syncKey:          "fbs:syncKey",
   videoSegmentMins: "fbs:videoSegmentMins",
+  slackChannels:    "fbs:slackChannels",
 };
 
 function generateSyncKey() {
@@ -419,6 +420,67 @@ async function callBackend(path, body) {
 }
 
 // ─── UI COMPONENTS ────────────────────────────────────────────────────────────
+function SlackSendPanel({ text, channel, setChannel, recentChannels, status, onSend, onClose }) {
+  const C = { card: "#161B27", border: "#1E2535", subtle: "#374151", muted: "#6B7280", amber: "#F59E0B", text: "#E5E7EB", green: "#10B981", red: "#EF4444" };
+  const sending = status === "sending";
+  const sent    = status === "sent";
+  const errMsg  = status.startsWith("error:") ? status.slice(6) : null;
+  return (
+    <div style={{ marginTop: 10, background: "#0F1117", border: `1px solid #4A154B55`,
+      borderRadius: 6, padding: "14px 16px", animation: "slideIn 0.15s ease" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+        <div style={{ fontSize: 11, fontFamily: "'DM Mono'", color: "#9B59B6",
+          textTransform: "uppercase", letterSpacing: "0.08em" }}>
+          Send to Slack
+        </div>
+        <button onClick={onClose} style={{ background: "none", border: "none",
+          color: C.muted, cursor: "pointer", fontSize: 14, padding: "0 2px" }}>✕</button>
+      </div>
+      {recentChannels.length > 0 && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+          {recentChannels.map(ch => (
+            <button key={ch} onClick={() => setChannel(ch)}
+              style={{ background: channel === ch ? "#4A154B33" : "transparent",
+                border: `1px solid ${channel === ch ? "#9B59B6" : C.subtle}`,
+                borderRadius: 4, padding: "3px 10px", color: channel === ch ? "#9B59B6" : C.muted,
+                fontFamily: "'DM Mono'", fontSize: 11, cursor: "pointer" }}>
+              {ch}
+            </button>
+          ))}
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <input
+          value={channel}
+          onChange={e => setChannel(e.target.value)}
+          placeholder="#channel-name"
+          style={{ flex: 1, background: C.card, border: `1px solid ${C.subtle}`,
+            borderRadius: 4, padding: "7px 10px", color: C.text,
+            fontFamily: "'DM Mono'", fontSize: 12 }}
+        />
+        <button onClick={() => onSend(text)} disabled={sending || !channel.trim()}
+          style={{ background: sending || !channel.trim() ? C.subtle : "#4A154B",
+            border: "none", borderRadius: 4, padding: "7px 18px",
+            color: sending || !channel.trim() ? C.muted : "#fff",
+            fontFamily: "'DM Mono'", fontSize: 12, cursor: sending || !channel.trim() ? "not-allowed" : "pointer",
+            whiteSpace: "nowrap" }}>
+          {sending ? "Sending…" : sent ? "✓ Sent" : "Send"}
+        </button>
+      </div>
+      {errMsg && (
+        <div style={{ marginTop: 8, fontSize: 11, color: C.red, fontFamily: "'DM Mono'" }}>
+          ⚠ {errMsg}
+        </div>
+      )}
+      {sent && (
+        <div style={{ marginTop: 8, fontSize: 11, color: C.green, fontFamily: "'DM Mono'" }}>
+          ✓ Posted to {channel}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function StatusBadge({ stage }) {
   const map = {
     idle:         { label: "Ready",                color: "#4B5563" },
@@ -495,6 +557,10 @@ export default function FBSQuoteScoper() {
   const [refinementOpen, setRefinementOpen]       = useState(false);
   const [audioClips, setAudioClips]               = useState([]);
   const [pipelineMode, setPipelineMode]           = useState("quote"); // "quote" | "summary"
+  const [slackTarget, setSlackTarget]             = useState(null);    // null | "quote" | "summary"
+  const [slackChannel, setSlackChannel]           = useState("");
+  const [slackStatus, setSlackStatus]             = useState("");      // "" | "sending" | "sent" | "error:msg"
+  const [recentSlackChannels, setRecentSlackChannels] = useState(() => loadLS(LS.slackChannels, []));
   const [transcriptData, setTranscriptData]       = useState(null);
   const [descriptionData, setDescriptionData]     = useState(null);
   const [summaryData, setSummaryData]             = useState(null);
@@ -952,13 +1018,13 @@ export default function FBSQuoteScoper() {
     }
   };
 
-  const copyQuote = () => {
-    if (!quoteData) return;
+  const buildQuoteText = (mode) => {
+    if (!quoteData) return "";
     const q = quoteData;
     const isNew = q.labour_subtotal !== undefined;
-
+    const m = mode || quoteMode;
     let lines;
-    if (quoteMode === "detailed") {
+    if (m === "detailed") {
       lines = [
         `FALLOW BUILDING SERVICES — QUOTE ESTIMATE`,
         `Ref: ${jobRef}${jobSummary ? ` — ${jobSummary}` : ""}${q.complexity ? ` · ${q.complexity}` : ""}`,
@@ -1021,7 +1087,28 @@ export default function FBSQuoteScoper() {
         q.vat_note,
       ];
     }
-    navigator.clipboard.writeText(lines.join("\n"));
+    return lines.join("\n");
+  };
+
+  const copyQuote = () => navigator.clipboard.writeText(buildQuoteText());
+
+  const sendToSlack = async (text) => {
+    const ch = slackChannel.trim();
+    if (!ch || !text) return;
+    setSlackStatus("sending");
+    try {
+      await callBackend("/api/slack", { channel: ch, text });
+      setSlackStatus("sent");
+      setRecentSlackChannels(prev => {
+        const updated = [ch, ...prev.filter(c => c !== ch)].slice(0, 5);
+        try { localStorage.setItem(LS.slackChannels, JSON.stringify(updated)); } catch {}
+        return updated;
+      });
+      setTimeout(() => { setSlackStatus(""); setSlackTarget(null); }, 3000);
+    } catch (e) {
+      setSlackStatus("error:" + (e.message || "Failed to post to Slack"));
+      setTimeout(() => setSlackStatus(""), 6000);
+    }
   };
 
   const C = {
@@ -1486,18 +1573,38 @@ export default function FBSQuoteScoper() {
                       textTransform: "uppercase", letterSpacing: "0.08em" }}>
                       Scope of Works
                     </div>
-                    <button onClick={() => navigator.clipboard.writeText(summaryData)}
-                      style={{ background: "transparent", border: `1px solid ${C.subtle}`,
-                        borderRadius: 4, padding: "4px 12px", color: C.muted,
-                        fontFamily: "'DM Mono'", fontSize: 11, cursor: "pointer" }}>
-                      Copy
-                    </button>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button onClick={() => navigator.clipboard.writeText(summaryData)}
+                        style={{ background: "transparent", border: `1px solid ${C.subtle}`,
+                          borderRadius: 4, padding: "4px 12px", color: C.muted,
+                          fontFamily: "'DM Mono'", fontSize: 11, cursor: "pointer" }}>
+                        Copy
+                      </button>
+                      <button onClick={() => setSlackTarget(t => t === "summary" ? null : "summary")}
+                        style={{ background: slackTarget === "summary" ? "#4A154B33" : "transparent",
+                          border: `1px solid ${slackTarget === "summary" ? "#9B59B6" : C.subtle}`,
+                          borderRadius: 4, padding: "4px 12px",
+                          color: slackTarget === "summary" ? "#9B59B6" : C.muted,
+                          fontFamily: "'DM Mono'", fontSize: 11, cursor: "pointer" }}>
+                        Slack
+                      </button>
+                    </div>
                   </div>
                   <pre style={{ background: "#0F1117", borderRadius: 6, padding: "16px 18px",
                     border: `1px solid ${C.border}`, fontSize: 13, color: C.text,
                     lineHeight: 1.75, whiteSpace: "pre-wrap", fontFamily: "'DM Mono'", margin: 0 }}>
                     {summaryData}
                   </pre>
+                  {slackTarget === "summary" && (
+                    <SlackSendPanel
+                      text={summaryData}
+                      channel={slackChannel} setChannel={setSlackChannel}
+                      recentChannels={recentSlackChannels}
+                      status={slackStatus}
+                      onSend={sendToSlack}
+                      onClose={() => setSlackTarget(null)}
+                    />
+                  )}
                   {transcriptData && (
                     <details style={{ marginTop: 8 }}>
                       <summary style={{ cursor: "pointer", fontSize: 11, color: C.muted,
@@ -1675,6 +1782,15 @@ export default function FBSQuoteScoper() {
                           </button>
                         ))}
                       </div>
+                      <button onClick={() => setSlackTarget(t => t === "quote" ? null : "quote")}
+                        style={{ background: slackTarget === "quote" ? "#4A154B33" : "transparent",
+                          border: `1px solid ${slackTarget === "quote" ? "#9B59B6" : C.subtle}`,
+                          borderRadius: 5, padding: "5px 14px",
+                          color: slackTarget === "quote" ? "#9B59B6" : C.muted,
+                          fontSize: 11, fontFamily: "'DM Mono'", cursor: "pointer",
+                          letterSpacing: "0.06em" }}>
+                        SLACK
+                      </button>
                       <button onClick={copyQuote}
                         style={{ background: "transparent", border: `1px solid ${C.subtle}`,
                           borderRadius: 5, padding: "5px 14px", color: C.muted, fontSize: 11,
@@ -1854,6 +1970,16 @@ export default function FBSQuoteScoper() {
                       {quoteData.vat_note}
                     </div>
                   </div>
+                  {slackTarget === "quote" && (
+                    <SlackSendPanel
+                      text={buildQuoteText("detailed")}
+                      channel={slackChannel} setChannel={setSlackChannel}
+                      recentChannels={recentSlackChannels}
+                      status={slackStatus}
+                      onSend={sendToSlack}
+                      onClose={() => setSlackTarget(null)}
+                    />
+                  )}
                 </div>
               )}
 
