@@ -99,7 +99,7 @@ async function parseTranscript(transcript) {
       "X-Title": "FBS Voice Materials Parser",
     },
     body: JSON.stringify({
-      model: "google/gemini-2.5-flash-preview",
+      model: "google/gemini-2.5-flash",
       max_tokens: 8000,
       temperature: 0.2,
       response_format: { type: "json_object" },
