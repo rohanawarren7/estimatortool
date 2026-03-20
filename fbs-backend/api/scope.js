@@ -4,7 +4,7 @@
 // Multiplier table in the frontend owns all complexity uplift.
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-const MODEL = "google/gemini-2.5-flash-preview";
+const MODEL = "google/gemini-2.5-flash";
 
 const VALID_TIERS = [
   "like-for-like swap",
