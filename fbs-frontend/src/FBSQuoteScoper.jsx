@@ -270,10 +270,13 @@ function captureFrame(video, maxDim) {
   });
 }
 
-function seekWithTimeout(video, t, timeoutMs = 20000) {
+function seekWithTimeout(video, t, timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`Seek timeout at ${t.toFixed(1)}s`)), timeoutMs);
-    video.onseeked = () => { clearTimeout(timer); resolve(); };
+    const timer = setTimeout(() => {
+      video.onseeked = null;
+      reject(new Error(`Seek timeout at ${t.toFixed(1)}s`));
+    }, timeoutMs);
+    video.onseeked = () => { clearTimeout(timer); video.onseeked = null; resolve(); };
     video.currentTime = t;
   });
 }
@@ -296,6 +299,10 @@ function formatSegTime(secs) {
 }
 
 // startSecs / endSecs: when provided, extract frames only from that time range (for segmented mode)
+// NOTE: requestVideoFrameCallback (RVFC) is intentionally NOT used here.
+// RVFC only fires when the video is actively playing, not when seeking a paused video.
+// Using RVFC without calling .play() causes an indefinite hang at frame 1.
+// The seekWithTimeout / onseeked path works reliably across all browsers and mobile Safari.
 function extractVideoFrames(file, maxDim = 512, onProgress, startSecs = null, endSecs = null) {
   return new Promise((resolve, reject) => {
     const video = document.createElement("video");
@@ -306,39 +313,34 @@ function extractVideoFrames(file, maxDim = 512, onProgress, startSecs = null, en
     video.src = objectUrl;
 
     video.onloadedmetadata = async () => {
-      const duration = video.duration;
-      // When range is provided, use it directly. Only apply the intro/outro buffer for the natural endpoints.
-      const start = startSecs !== null ? startSecs
-        : Math.min(2, duration * 0.05);
-      const end   = endSecs !== null   ? endSecs
-        : Math.max(start + 0.1, duration - Math.min(2, duration * 0.05));
-      const count = adaptiveFrameCount(end - start);
-      const timestamps = Array.from({ length: count }, (_, i) =>
-        count === 1 ? start : start + (i / (count - 1)) * (end - start)
-      );
+      try {
+        const duration = video.duration;
+        // When range is provided, use it directly. Only apply the intro/outro buffer for the natural endpoints.
+        const start = startSecs !== null ? startSecs
+          : Math.min(2, duration * 0.05);
+        const end   = endSecs !== null   ? endSecs
+          : Math.max(start + 0.1, duration - Math.min(2, duration * 0.05));
+        const count = adaptiveFrameCount(end - start);
+        const timestamps = Array.from({ length: count }, (_, i) =>
+          count === 1 ? start : start + (i / (count - 1)) * (end - start)
+        );
 
-      const frames = [];
-      const useRVFC = "requestVideoFrameCallback" in HTMLVideoElement.prototype;
+        const frames = [];
 
-      for (let i = 0; i < timestamps.length; i++) {
-        onProgress?.(i + 1, count);
-        if (useRVFC) {
-          await new Promise(res => {
-            video.requestVideoFrameCallback(async () => {
-              const { b64, url } = await captureFrame(video, maxDim);
-              frames.push({
-                name: `${file.name} · frame ${i + 1}/${count}`,
-                b64, url, type: "image/jpeg", source: "video", videoName: file.name,
-              });
-              res();
-            });
-            video.currentTime = timestamps[i];
-          });
-        } else {
+        // Prime the decoder: perform the first seek before the loop begins.
+        // Without this, some browsers stall on the very first seek in the loop.
+        await new Promise(res => {
+          const primeTimer = setTimeout(res, 4000); // give up and proceed after 4s
+          video.onseeked = () => { clearTimeout(primeTimer); video.onseeked = null; res(); };
+          video.currentTime = timestamps[0];
+        });
+
+        for (let i = 0; i < timestamps.length; i++) {
+          onProgress?.(i + 1, count);
           try {
             await seekWithTimeout(video, timestamps[i]);
           } catch {
-            // If seek times out, skip this frame and continue
+            // Seek timed out — skip this frame and continue rather than hanging
             continue;
           }
           const { b64, url } = await captureFrame(video, maxDim);
@@ -347,10 +349,13 @@ function extractVideoFrames(file, maxDim = 512, onProgress, startSecs = null, en
             b64, url, type: "image/jpeg", source: "video", videoName: file.name,
           });
         }
-      }
 
-      URL.revokeObjectURL(objectUrl);
-      resolve(frames);
+        URL.revokeObjectURL(objectUrl);
+        resolve(frames);
+      } catch (err) {
+        URL.revokeObjectURL(objectUrl);
+        reject(err);
+      }
     };
 
     video.onerror = () => { URL.revokeObjectURL(objectUrl); reject(new Error("Could not load video")); };
