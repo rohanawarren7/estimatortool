@@ -602,11 +602,12 @@ function StatusBadge({ stage }) {
     describing:   { label: "Analysing frames…",    color: "#D97706" },
     scoping:      { label: "Building takeoff…",    color: "#D97706" },
     summarising:  { label: "Summarising scope…",   color: "#D97706" },
+    identifying:  { label: "Identifying materials…", color: "#D97706" },
     done:         { label: "Ready",                color: "#059669" },
     error:        { label: "Error",                color: "#DC2626" },
   };
   const s = map[stage] || map.idle;
-  const busy = stage === "transcribing" || stage === "describing" || stage === "scoping" || stage === "summarising";
+  const busy = stage === "transcribing" || stage === "describing" || stage === "scoping" || stage === "summarising" || stage === "identifying";
   return (
     <span style={{
       fontSize: 11, fontFamily: "'DM Mono', monospace", letterSpacing: "0.1em",
@@ -670,7 +671,7 @@ export default function FBSQuoteScoper() {
   const [refinementText, setRefinementText]       = useState("");
   const [refinementOpen, setRefinementOpen]       = useState(false);
   const [audioClips, setAudioClips]               = useState([]);
-  const [pipelineMode, setPipelineMode]           = useState("quote"); // "quote" | "summary"
+  const [pipelineMode, setPipelineMode]           = useState("quote"); // "quote" | "summary" | "materials"
   const [slackTarget, setSlackTarget]             = useState(null);    // null | "quote" | "summary"
   const [slackChannel, setSlackChannel]           = useState("");
   const [slackStatus, setSlackStatus]             = useState("");      // "" | "sending" | "sent" | "error:msg"
@@ -694,6 +695,7 @@ export default function FBSQuoteScoper() {
   const [streamingText, setStreamingText]         = useState("");   // live token stream during AI stages
   const [errorStage, setErrorStage]               = useState("");   // which stage failed
   const [showMaterialsSourcing, setShowMaterialsSourcing] = useState(false);
+  const [materialsInitial, setMaterialsInitial]           = useState(null); // pre-loaded from pipeline
   const fileRef         = useRef();
   const streamingBoxRef = useRef();
 
@@ -702,6 +704,7 @@ export default function FBSQuoteScoper() {
     describing:   "Site Analysis (Gemini 2.0 Flash)",
     scoping:      "Quantity Takeoff (Kimi K2.5)",
     summarising:  "Scope Summary (Kimi K2.5)",
+    identifying:  "Materials Identification (Gemini 2.5 Pro)",
   };
 
   useEffect(() => {
@@ -1196,6 +1199,72 @@ export default function FBSQuoteScoper() {
     }
   };
 
+  const runMaterialsPipeline = async () => {
+    if (images.length === 0 && audioClips.length === 0) { setError("Upload at least one photo or video to source materials."); return; }
+    setError(""); setErrorStage(""); setStreamingText("");
+    setScopeData(null); setQuoteData(null); setTranscriptData(null); setDescriptionData(null);
+
+    try {
+      setTab("quote");
+
+      // Stage 1 — Describe (identical to runPipeline)
+      let description = "";
+      if (images.length === 0) {
+        description = "[No visual survey — audio transcript only]";
+      } else {
+        setStage("describing");
+        setStreamingText("");
+        let descResult;
+        await callBackendStream(
+          "/api/describe",
+          { images, ...(jobDescription.trim() && { jobDescription: jobDescription.trim() }) },
+          token  => setStreamingText(prev => prev + token),
+          result => { descResult = result; }
+        );
+        if (!descResult) throw new Error("No result from Gemini");
+        description = descResult.description;
+        if (descResult.truncated) setDescribeTruncated(true);
+        setDescriptionData(description);
+      }
+
+      // Stage 2 — Scope (identical to runPipeline)
+      setStage("scoping");
+      setStreamingText("");
+      let scopeResult;
+      await callBackendStream(
+        "/api/scope",
+        {
+          description,
+          ...(jobDescription.trim() && { jobDescription: jobDescription.trim() }),
+        },
+        token  => setStreamingText(prev => prev + token),
+        result => { scopeResult = result; }
+      );
+      if (!scopeResult) throw new Error("No result from Kimi");
+      setScopeData(scopeResult);
+
+      // Stage 3 — Identify materials
+      setStage("identifying");
+      setStreamingText("");
+      const identResult = await callBackend("/api/materials-identify", {
+        scopeItems: scopeResult.items || [],
+        description,
+        ...(jobDescription.trim() && { jobDescription: jobDescription.trim() }),
+        images: images.slice(0, 20),
+      });
+
+      setStage("done");
+      // Open the MaterialsSourcing modal pre-loaded at the "identified" review stage
+      setMaterialsInitial(identResult);
+      setShowMaterialsSourcing(true);
+
+    } catch (e) {
+      setErrorStage(stage);
+      setError(e.message);
+      setStage("error");
+    }
+  };
+
   const buildQuoteText = (mode) => {
     if (!quoteData) return "";
     const q = quoteData;
@@ -1354,7 +1423,10 @@ export default function FBSQuoteScoper() {
   const busy        = stage === "transcribing" || stage === "describing" || stage === "scoping" || stage === "summarising";
   const hasAudio    = audioClips.length > 0;
   const totalStages = hasAudio ? 3 : 2;
-  const handleRun   = () => pipelineMode === "summary" ? runSummaryPipeline() : runPipeline();
+  const handleRun   = () =>
+    pipelineMode === "summary"   ? runSummaryPipeline()   :
+    pipelineMode === "materials" ? runMaterialsPipeline() :
+                                   runPipeline();
   const videoNames  = [...new Set(images.filter(i => i.source === "video").map(i => i.videoName))];
 
   return (
@@ -1430,8 +1502,9 @@ export default function FBSQuoteScoper() {
           <div style={{ display: "flex", borderRadius: 5, overflow: "hidden",
             border: `1px solid ${C.subtle}`, flexShrink: 0 }}>
             {[
-              { id: "quote",   label: "Full Quote" },
-              { id: "summary", label: "Scope Only" },
+              { id: "quote",     label: "Full Quote"    },
+              { id: "summary",   label: "Scope Only"    },
+              { id: "materials", label: "Source Materials" },
             ].map(({ id, label }) => (
               <button key={id} onClick={() => setPipelineMode(id)} disabled={busy}
                 style={{ padding: "8px 14px", border: "none", cursor: busy ? "not-allowed" : "pointer",
@@ -1446,11 +1519,14 @@ export default function FBSQuoteScoper() {
             style={{ background: busy ? C.subtle : C.amber, color: "#000", border: "none",
               borderRadius: 6, padding: "10px 28px", fontFamily: "'Bebas Neue'", fontSize: 16,
               letterSpacing: "0.08em", cursor: busy ? "not-allowed" : "pointer", whiteSpace: "nowrap" }}>
-            {stage === "transcribing" ? "Transcribing…" :
-             stage === "summarising"  ? "Summarising…"  :
-             stage === "describing"   ? "Analysing…"    :
-             stage === "scoping"      ? "Scoping…"      :
-             pipelineMode === "summary" ? "▶  Transcribe + Summarise" : "▶  Run Scope + Price"}
+            {stage === "transcribing" ? "Transcribing…"  :
+             stage === "summarising"  ? "Summarising…"   :
+             stage === "describing"   ? "Analysing…"     :
+             stage === "scoping"      ? "Scoping…"       :
+             stage === "identifying"  ? "Identifying…"   :
+             pipelineMode === "summary"   ? "▶  Transcribe + Summarise"    :
+             pipelineMode === "materials" ? "▶  Analyse + Source Materials" :
+                                           "▶  Run Scope + Price"}
           </button>
         </div>
 
@@ -1788,7 +1864,12 @@ export default function FBSQuoteScoper() {
               )}
               {stage === "scoping" && (
                 <div style={{ padding: "40px 0", textAlign: "center" }}>
-                  <Spinner label={`Stage ${hasAudio ? "3" : "2"}/${totalStages} · Kimi K2.5 building quantity takeoff…`} />
+                  <Spinner label={`Stage ${hasAudio ? "3" : "2"}/${pipelineMode === "materials" ? 3 : totalStages} · Kimi K2.5 building quantity takeoff…`} />
+                </div>
+              )}
+              {stage === "identifying" && (
+                <div style={{ padding: "40px 0", textAlign: "center" }}>
+                  <Spinner label={`Stage 3/3 · Gemini 2.5 Pro identifying materials…`} />
                 </div>
               )}
 
@@ -2583,16 +2664,17 @@ export default function FBSQuoteScoper() {
 
     </div>
 
-    {showMaterialsSourcing && scopeData && (
+    {showMaterialsSourcing && (
       <MaterialsSourcing
-        scopeItems={scopeData.items || []}
+        scopeItems={scopeData?.items || []}
         description={descriptionData || ""}
         images={images}
         jobRef={jobRef}
         jobDescription={jobDescription}
         apiBase={VERCEL_BASE_URL || ""}
         secret={FBS_SECRET || ""}
-        onClose={() => setShowMaterialsSourcing(false)}
+        initialMaterials={materialsInitial}
+        onClose={() => { setShowMaterialsSourcing(false); setMaterialsInitial(null); }}
       />
     )}
   );

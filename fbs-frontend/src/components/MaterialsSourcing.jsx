@@ -240,13 +240,14 @@ export default function MaterialsSourcing({
   apiBase = "",
   secret = "",
   onClose,
+  initialMaterials = null, // pre-loaded from pipeline — skips identify step
 }) {
-  const [stage, setStage] = useState("idle"); // idle|identifying|identified|sourcing|complete|error
+  const [stage, setStage] = useState(initialMaterials ? "identified" : "idle");
   const [budget, setBudget] = useState("standard");
-  const [identified, setIdentified] = useState(null);
+  const [identified, setIdentified] = useState(initialMaterials);
   const [sourced, setSourced] = useState(null);
   const [errorMsg, setErrorMsg] = useState("");
-  const [editedMaterials, setEditedMaterials] = useState([]);
+  const [editedMaterials, setEditedMaterials] = useState(initialMaterials?.materials || []);
 
   const headers = {
     "Content-Type": "application/json",
