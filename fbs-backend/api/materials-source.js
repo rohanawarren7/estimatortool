@@ -107,9 +107,6 @@ module.exports = async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  // Flush CORS headers before the long Perplexity Sonar call
-  res.flushHeaders();
-
   const secret = process.env.FBS_SECRET;
   if (secret && req.headers["x-fbs-secret"] !== secret) {
     return res.status(401).json({ error: "Unauthorised" });

@@ -90,11 +90,6 @@ module.exports = async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  // Flush CORS headers immediately — Gemini 2.5 Pro can take 30–60s and
-  // Railway's proxy will send its own error response (without CORS headers)
-  // if we don't flush before the long AI call begins.
-  res.flushHeaders();
-
   const secret = process.env.FBS_SECRET;
   if (secret && req.headers["x-fbs-secret"] !== secret) {
     return res.status(401).json({ error: "Unauthorised" });
@@ -144,7 +139,7 @@ module.exports = async function handler(req, res) {
       },
       body: JSON.stringify({
         model: MODEL,
-        max_tokens: 8000,
+        max_tokens: 16000,
         temperature: 0.2,
         messages: [{ role: "user", content: contentParts }]
       })
