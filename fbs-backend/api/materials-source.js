@@ -7,11 +7,13 @@
 // Body: { materials: [...from identify stage], budget: "standard"|"mid"|"premium" }
 // Response: { sourced: [...], grand_total: number, currency: "GBP" }
 //
-// Perplexity Sonar Pro is called ONCE with all materials batched (groups of 15)
-// to minimise API cost. Each material gets 2–3 sourced options where possible.
+// Perplexity Sonar Pro is called once per batch of BATCH_SIZE items.
+// Batch size reduced from 15 → 10 to improve JSON reliability and avoid truncation.
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-const MODEL = "perplexity/sonar-pro-search";
+const MODEL          = "perplexity/sonar-pro-search";
+const BATCH_SIZE     = 10;   // Reduced from 15 for better JSON reliability
+const MAX_TOKENS_PER_BATCH = 10000; // Raised from 8000
 
 function buildSourcingPrompt(materials, budget = "standard") {
   const budgetGuidance = {
@@ -99,6 +101,26 @@ RESPOND ONLY in this exact JSON format — no markdown, no preamble:
 }`;
 }
 
+// --------------------------------------------------------------------------
+// Simple JSON repair: truncate to last complete sourced object, close array/object
+// --------------------------------------------------------------------------
+function repairJson(raw) {
+  const clean = raw.replace(/```json|```/g, "").trim();
+  const start = clean.indexOf("{");
+  const end   = clean.lastIndexOf("}");
+  if (start === -1) return null;
+  if (end !== -1 && end > start) {
+    try { return JSON.parse(clean.slice(start, end + 1)); } catch {}
+  }
+  // Attempt repair: find last complete sourced entry (ends with "}," or "}" before "]")
+  const lastGoodBrace = clean.lastIndexOf("},", end);
+  if (lastGoodBrace > start) {
+    const repaired = clean.slice(start, lastGoodBrace + 1) + '],"grand_total":0,"currency":"GBP","notes":"[truncated — partial results]"}';
+    try { return JSON.parse(repaired); } catch {}
+  }
+  return null;
+}
+
 module.exports = async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -121,18 +143,19 @@ module.exports = async function handler(req, res) {
   const validBudgets = ["standard", "mid", "premium"];
   const safeBudget = validBudgets.includes(budget) ? budget : "standard";
 
-  // Batch into groups of 15 to keep Perplexity context manageable
-  const BATCH_SIZE = 15;
+  // Batch into groups of BATCH_SIZE
   const batches = [];
   for (let i = 0; i < materials.length; i += BATCH_SIZE) {
     batches.push(materials.slice(i, i + BATCH_SIZE));
   }
 
+  console.log(`Materials source: ${materials.length} items → ${batches.length} batch(es) of max ${BATCH_SIZE}`);
+
   const allSourced = [];
-  let grandTotal = 0;
 
   try {
-    for (const batch of batches) {
+    for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
+      const batch  = batches[batchIdx];
       const prompt = buildSourcingPrompt(batch, safeBudget);
 
       const response = await fetch(OPENROUTER_URL, {
@@ -145,7 +168,7 @@ module.exports = async function handler(req, res) {
         },
         body: JSON.stringify({
           model: MODEL,
-          max_tokens: 8000,
+          max_tokens: MAX_TOKENS_PER_BATCH,
           temperature: 0.1,
           messages: [{ role: "user", content: prompt }]
         })
@@ -153,27 +176,24 @@ module.exports = async function handler(req, res) {
 
       if (!response.ok) {
         const err = await response.json().catch(() => ({}));
-        console.error("Perplexity error:", err);
+        console.error(`Perplexity error on batch ${batchIdx}:`, err);
         return res.status(502).json({
           error: err?.error?.message || `Perplexity API error ${response.status}`
         });
       }
 
-      const data = await response.json();
-      const raw = data.choices?.[0]?.message?.content || "";
+      const data      = await response.json();
+      const raw       = data.choices?.[0]?.message?.content || "";
       const finishReason = data.choices?.[0]?.finish_reason;
-      console.log("Sourcing raw length:", raw.length, "chars, finish:", finishReason);
-
       const citations = data.citations || [];
 
-      const clean = raw.replace(/```json|```/g, "").trim();
-      const start = clean.indexOf("{");
-      const end = clean.lastIndexOf("}");
-      if (start === -1 || end === -1) {
-        console.warn("No JSON found in batch, skipping. Raw:", raw.slice(0, 300));
+      console.log(`Batch ${batchIdx}: ${raw.length} chars, finish: ${finishReason}`);
+
+      const parsed = repairJson(raw);
+      if (!parsed) {
+        console.warn(`Batch ${batchIdx}: No valid JSON found, skipping. Raw: ${raw.slice(0, 300)}`);
         continue;
       }
-      const parsed = JSON.parse(clean.slice(start, end + 1));
 
       if (parsed.sourced && Array.isArray(parsed.sourced)) {
         const enriched = parsed.sourced.map(item => ({
@@ -182,12 +202,11 @@ module.exports = async function handler(req, res) {
           recommended_total: Number(item.recommended_total) || 0,
         }));
         allSourced.push(...enriched);
-        grandTotal += Number(parsed.grand_total) || 0;
       }
     }
 
-    // Recalculate grand total from recommended options for accuracy
-    grandTotal = allSourced.reduce((sum, item) => sum + (item.recommended_total || 0), 0);
+    // Grand total from recommended options
+    const grandTotal = allSourced.reduce((sum, item) => sum + (item.recommended_total || 0), 0);
 
     return res.status(200).json({
       sourced: allSourced,
