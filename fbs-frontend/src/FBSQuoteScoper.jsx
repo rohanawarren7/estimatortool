@@ -551,10 +551,12 @@ export default function FBSQuoteScoper() {
     const photos = [];
     const videos = [];
     const pdfs   = [];
+    const audios = [];
     for (const f of files) {
       if (f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf")) pdfs.push(f);
       else if (f.type.startsWith("image/"))      photos.push(f);
       else if (f.type.startsWith("video/"))      videos.push(f);
+      else if (f.type === "audio/wav" || f.type.startsWith("audio/") || f.name.toLowerCase().endsWith(".wav")) audios.push(f);
     }
 
     if (photos.length) {
@@ -647,6 +649,21 @@ export default function FBSQuoteScoper() {
         }
       } finally {
         setPdfProcessing(false);
+      }
+    }
+
+    if (audios.length) {
+      for (const af of audios) {
+        const b64 = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload  = () => resolve(reader.result.split(",")[1]);
+          reader.onerror = reject;
+          reader.readAsDataURL(af);
+        });
+        setAudioClips(prev => [
+          ...prev.filter(c => c.audioName !== af.name),
+          { audioName: af.name, b64 },
+        ]);
       }
     }
   }, []);
@@ -774,7 +791,7 @@ export default function FBSQuoteScoper() {
   };
 
   const runPipeline = async () => {
-    if (images.length === 0) { setError("Upload at least one photo or video."); return; }
+    if (images.length === 0 && audioClips.length === 0) { setError("Upload at least one photo, video, or WAV audio file."); return; }
     setError(""); setScopeData(null); setQuoteData(null); setTranscriptData(null); setDescriptionData(null);
     const hasAudio = audioClips.length > 0;
 
@@ -796,11 +813,16 @@ export default function FBSQuoteScoper() {
 
       // Stage 2 — Gemini 2.0 Flash: frames → rich text description
       // If frames carry segmentId, each segment gets its own Gemini call; descriptions are combined.
-      setStage("describing");
-      setDescribeSegProgress(null);
-
+      // Skipped when there are no images (audio-only job).
       let description;
       let truncated = false;
+
+      if (images.length === 0) {
+        // Audio-only — no visual survey; scope will be derived from the transcript alone
+        description = "[No visual survey — scope is based on the audio transcript above.]";
+      } else {
+      setStage("describing");
+      setDescribeSegProgress(null);
 
       const segIds = [...new Set(images.map(img => img.segmentId))]
         .filter(id => id !== null && id !== undefined)
@@ -861,6 +883,7 @@ export default function FBSQuoteScoper() {
           truncated   = result.truncated;
         }
       }
+      } // end else (images.length > 0)
 
       setDescriptionData(description);
       if (truncated) setDescribeTruncated(true);
@@ -1101,7 +1124,7 @@ export default function FBSQuoteScoper() {
                 style={{ border: `2px dashed ${videoProcessing ? C.amber : C.subtle}`, borderRadius: 8,
                   padding: "40px 20px", textAlign: "center", cursor: "pointer", marginBottom: 20,
                   transition: "border-color 0.2s" }}>
-                <input ref={fileRef} type="file" multiple accept="image/*,video/*,application/pdf,.pdf" style={{ display: "none" }}
+                <input ref={fileRef} type="file" multiple accept="image/*,video/*,audio/wav,.wav,application/pdf,.pdf" style={{ display: "none" }}
                   onChange={e => handleFiles(Array.from(e.target.files))} />
                 {videoProcessing ? (
                   <Spinner label={videoProgressLabel ? `Extracting video — ${videoProgressLabel}` : "Extracting video frames…"} />
@@ -1110,9 +1133,9 @@ export default function FBSQuoteScoper() {
                 ) : (
                   <>
                     <div style={{ fontSize: 32, marginBottom: 10 }}>📸</div>
-                    <div style={{ color: C.muted, fontSize: 14 }}>Drop photos, videos or PDF drawings here, or click to browse</div>
+                    <div style={{ color: C.muted, fontSize: 14 }}>Drop photos, videos, WAV audio or PDF drawings here, or click to browse</div>
                     <div style={{ color: C.subtle, fontSize: 11, marginTop: 6, fontFamily: "'DM Mono'" }}>
-                      JPG · PNG · WEBP · MP4 · MOV · PDF · multiple angles recommended
+                      JPG · PNG · WEBP · MP4 · MOV · WAV · PDF · multiple angles recommended
                     </div>
                     <div style={{ color: C.subtle, fontSize: 10, marginTop: 8, fontFamily: "'DM Mono'", lineHeight: 1.5 }}>
                       iPhone tip: Settings → Camera → Formats → <strong style={{ color: C.muted }}>Most Compatible</strong> to record in H.264 (works in all browsers)
@@ -1129,6 +1152,15 @@ export default function FBSQuoteScoper() {
                   🎬 {videoNames.length} video{videoNames.length > 1 ? "s" : ""} →{" "}
                   {images.filter(i => i.source === "video").length} frames extracted
                   {audioClips.length > 0 && " · audio ready for transcription"}
+                </div>
+              )}
+
+              {/* WAV audio summary */}
+              {audioClips.filter(c => c.audioName).length > 0 && (
+                <div style={{ marginBottom: 12, padding: "8px 14px", background: "#8B5CF611",
+                  border: `1px solid #8B5CF633`, borderRadius: 6, fontSize: 12,
+                  color: C.muted, fontFamily: "'DM Mono'" }}>
+                  🎙 {audioClips.filter(c => c.audioName).map(c => c.audioName).join(", ")} · ready for transcription
                 </div>
               )}
 
