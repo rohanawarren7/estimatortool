@@ -1430,6 +1430,7 @@ export default function FBSQuoteScoper() {
   const videoNames  = [...new Set(images.filter(i => i.source === "video").map(i => i.videoName))];
 
   return (
+    <>
     <div style={{ minHeight: "100vh", background: C.bg, color: C.text,
       fontFamily: "'DM Sans', 'Segoe UI', sans-serif", paddingBottom: 60 }}>
       <style>{`
@@ -2677,5 +2678,6 @@ export default function FBSQuoteScoper() {
         onClose={() => { setShowMaterialsSourcing(false); setMaterialsInitial(null); }}
       />
     )}
+    </>
   );
 }
