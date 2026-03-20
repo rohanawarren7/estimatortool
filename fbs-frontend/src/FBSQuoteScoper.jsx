@@ -249,14 +249,46 @@ function adaptiveFrameCount(durationSecs) {
   return 24;
 }
 
-function captureFrame(video, maxDim) {
-  const scale = Math.min(1, maxDim / Math.max(video.videoWidth || 1, video.videoHeight || 1));
-  const w = Math.round((video.videoWidth || 640) * scale);
-  const h = Math.round((video.videoHeight || 360) * scale);
+// waitForRender: double rAF so the video compositor has time to paint the decoded frame
+// before drawImage is called. Without this, drawImage captures a black frame even though
+// onseeked has fired (the decode is complete but the render hasn't been committed).
+// Falls back to a 100ms setTimeout if rAF is unavailable (e.g. hidden tab).
+function waitForRender() {
+  return new Promise(res => {
+    if (typeof requestAnimationFrame !== "undefined") {
+      requestAnimationFrame(() => requestAnimationFrame(res));
+    } else {
+      setTimeout(res, 100);
+    }
+  });
+}
+
+// captureFrame: uses createImageBitmap to force the browser to fully decode the current
+// video frame into a bitmap independently of DOM compositing/rendering.
+// This avoids the black-frame problem that occurs when drawImage is called on an
+// off-screen <video> element whose render buffer hasn't been flushed yet.
+async function captureFrame(video, maxDim) {
+  const vw = video.videoWidth  || 640;
+  const vh = video.videoHeight || 360;
+  const scale = Math.min(1, maxDim / Math.max(vw, vh));
+  const w = Math.round(vw * scale);
+  const h = Math.round(vh * scale);
   const canvas = document.createElement("canvas");
-  canvas.width = w;
+  canvas.width  = w;
   canvas.height = h;
-  canvas.getContext("2d").drawImage(video, 0, 0, w, h);
+  const ctx = canvas.getContext("2d");
+
+  try {
+    // createImageBitmap forces a full decode of the current video frame into a bitmap.
+    // It works even when the <video> element is not attached to the DOM.
+    const bitmap = await createImageBitmap(video);
+    ctx.drawImage(bitmap, 0, 0, w, h);
+    bitmap.close();
+  } catch {
+    // Fallback for browsers without createImageBitmap (uncommon)
+    ctx.drawImage(video, 0, 0, w, h);
+  }
+
   return new Promise(resolve => {
     canvas.toBlob(blob => {
       const reader = new FileReader();
@@ -272,6 +304,12 @@ function captureFrame(video, maxDim) {
 
 function seekWithTimeout(video, t, timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
+    // If the video is already at (or extremely close to) the target position and has
+    // frame data available, resolve immediately. Some browsers silently skip a seek
+    // to the current position and never fire onseeked, causing an 8s timeout.
+    if (Math.abs(video.currentTime - t) < 0.05 && video.readyState >= 2) {
+      return resolve();
+    }
     const timer = setTimeout(() => {
       video.onseeked = null;
       reject(new Error(`Seek timeout at ${t.toFixed(1)}s`));
@@ -302,7 +340,7 @@ function formatSegTime(secs) {
 // NOTE: requestVideoFrameCallback (RVFC) is intentionally NOT used here.
 // RVFC only fires when the video is actively playing, not when seeking a paused video.
 // Using RVFC without calling .play() causes an indefinite hang at frame 1.
-// The seekWithTimeout / onseeked path works reliably across all browsers and mobile Safari.
+// The seekWithTimeout / onseeked + createImageBitmap path works reliably on all browsers.
 function extractVideoFrames(file, maxDim = 512, onProgress, startSecs = null, endSecs = null) {
   return new Promise((resolve, reject) => {
     const video = document.createElement("video");
@@ -312,8 +350,19 @@ function extractVideoFrames(file, maxDim = 512, onProgress, startSecs = null, en
     const objectUrl = URL.createObjectURL(file);
     video.src = objectUrl;
 
+    // Resolve as soon as the browser has enough data to start seeking.
+    // oncanplay fires when the browser can begin playback — at that point seek operations
+    // are supported and frame data is available. onloadeddata is the fallback.
+    const canPlayPromise = new Promise(res => {
+      video.oncanplay    = res;
+      video.onloadeddata = res;  // fired slightly earlier; adequate for most videos
+    });
+
     video.onloadedmetadata = async () => {
       try {
+        // Wait for video data to be buffered before seeking (5s max wait)
+        await Promise.race([canPlayPromise, new Promise(r => setTimeout(r, 5000))]);
+
         const duration = video.duration;
         // When range is provided, use it directly. Only apply the intro/outro buffer for the natural endpoints.
         const start = startSecs !== null ? startSecs
@@ -327,20 +376,15 @@ function extractVideoFrames(file, maxDim = 512, onProgress, startSecs = null, en
 
         const frames = [];
 
-        // Prime the decoder: perform the first seek before the loop begins.
-        // Without this, some browsers stall on the very first seek in the loop.
-        await new Promise(res => {
-          const primeTimer = setTimeout(res, 4000); // give up and proceed after 4s
-          video.onseeked = () => { clearTimeout(primeTimer); video.onseeked = null; res(); };
-          video.currentTime = timestamps[0];
-        });
-
         for (let i = 0; i < timestamps.length; i++) {
           onProgress?.(i + 1, count);
           try {
+            // Seek to target timestamp
             await seekWithTimeout(video, timestamps[i]);
+            // Wait for the video compositor to render the decoded frame before drawing
+            await waitForRender();
           } catch {
-            // Seek timed out — skip this frame and continue rather than hanging
+            // Seek timed out or failed — skip frame and continue
             continue;
           }
           const { b64, url } = await captureFrame(video, maxDim);
@@ -361,6 +405,7 @@ function extractVideoFrames(file, maxDim = 512, onProgress, startSecs = null, en
     video.onerror = () => { URL.revokeObjectURL(objectUrl); reject(new Error("Could not load video")); };
   });
 }
+
 
 async function extractPdfPages(file, maxPages = 10, maxDim = 2000, quality = 0.85) {
   const pdfjsLib = await import("pdfjs-dist");
