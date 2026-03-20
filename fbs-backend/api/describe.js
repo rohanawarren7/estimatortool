@@ -42,7 +42,7 @@ module.exports = async function handler(req, res) {
     return res.status(401).json({ error: "Unauthorised" });
   }
 
-  const { images, jobDescription } = req.body;
+  const { images, jobDescription, stream: streamMode } = req.body;
   if (!images || !Array.isArray(images) || images.length === 0) {
     return res.status(400).json({ error: "images array is required" });
   }
@@ -56,6 +56,91 @@ module.exports = async function handler(req, res) {
     image_url: { url: `data:${img.type};base64,${img.b64}` }
   }));
 
+  const requestBody = {
+    model: MODEL,
+    max_tokens: 8000,
+    temperature: 0.3,
+    messages: [{
+      role: "user",
+      content: [
+        { type: "text", text: contextPrefix + DESCRIBE_PROMPT },
+        ...imgContent
+      ]
+    }]
+  };
+
+  // ── Streaming path ─────────────────────────────────────────────────────────
+  if (streamMode) {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders();
+
+    try {
+      const response = await fetch(OPENROUTER_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
+          "HTTP-Referer": "https://fallowbuildingservices.co.uk",
+          "X-Title": "FBS Quote Scoper"
+        },
+        body: JSON.stringify({ ...requestBody, stream: true }),
+      });
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        res.write(`data: ${JSON.stringify({ type: "error", error: err?.error?.message || `Gemini API error ${response.status}` })}\n\n`);
+        return res.end();
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let accumulated = "";
+      let finishReason = null;
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop(); // hold incomplete line
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const payload = line.slice(6).trim();
+          if (payload === "[DONE]") continue;
+          let parsed;
+          try { parsed = JSON.parse(payload); } catch { continue; }
+          const token = parsed.choices?.[0]?.delta?.content || "";
+          finishReason = parsed.choices?.[0]?.finish_reason || finishReason;
+          if (!token) continue;
+          accumulated += token;
+          res.write(`data: ${JSON.stringify({ type: "token", content: token })}\n\n`);
+        }
+      }
+
+      if (!accumulated.trim()) {
+        res.write(`data: ${JSON.stringify({ type: "error", error: "Empty response from Gemini" })}\n\n`);
+        return res.end();
+      }
+
+      console.log("Gemini stream complete:", accumulated.length, "chars, finish_reason:", finishReason);
+      res.write(`data: ${JSON.stringify({
+        type: "done",
+        result: { description: accumulated.trim(), truncated: finishReason === "max_tokens" }
+      })}\n\n`);
+      res.end();
+
+    } catch (err) {
+      console.error("describe stream error:", err);
+      res.write(`data: ${JSON.stringify({ type: "error", error: err.message })}\n\n`);
+      res.end();
+    }
+    return;
+  }
+
+  // ── Non-streaming path (unchanged) ────────────────────────────────────────
   try {
     const response = await fetch(OPENROUTER_URL, {
       method: "POST",
@@ -65,18 +150,7 @@ module.exports = async function handler(req, res) {
         "HTTP-Referer": "https://fallowbuildingservices.co.uk",
         "X-Title": "FBS Quote Scoper"
       },
-      body: JSON.stringify({
-        model: MODEL,
-        max_tokens: 8000,
-        temperature: 0.3,
-        messages: [{
-          role: "user",
-          content: [
-            { type: "text", text: contextPrefix + DESCRIBE_PROMPT },
-            ...imgContent
-          ]
-        }]
-      })
+      body: JSON.stringify(requestBody),
     });
 
     if (!response.ok) {

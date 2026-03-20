@@ -476,6 +476,39 @@ async function callBackend(path, body) {
   return res.json();
 }
 
+async function callBackendStream(path, body, onToken, onDone) {
+  const res = await fetch(`${VERCEL_BASE_URL}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-fbs-secret": FBS_SECRET },
+    body: JSON.stringify({ ...body, stream: true }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err?.error || `HTTP ${res.status}`);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop(); // hold incomplete line
+    for (const line of lines) {
+      if (!line.startsWith("data: ")) continue;
+      const payload = line.slice(6).trim();
+      if (!payload) continue;
+      let event;
+      try { event = JSON.parse(payload); } catch { continue; }
+      if (event.type === "token")       onToken(event.content);
+      else if (event.type === "done")  { onDone(event.result); return; }
+      else if (event.type === "error")   throw new Error(event.error);
+    }
+  }
+  throw new Error("Stream closed without a result");
+}
+
 // ─── UI COMPONENTS ────────────────────────────────────────────────────────────
 function SlackSendPanel({ text, channel, setChannel, recentChannels, availableChannels, channelsLoading, status, onSend, onClose }) {
   const C = { card: "#161B27", border: "#1E2535", subtle: "#374151", muted: "#6B7280", amber: "#F59E0B", text: "#E5E7EB", green: "#10B981", red: "#EF4444" };
@@ -657,7 +690,22 @@ export default function FBSQuoteScoper() {
   });
   const [syncStatus, setSyncStatus]               = useState("");   // "", "syncing", "synced", "error"
   const [syncKeyInput, setSyncKeyInput]           = useState("");   // for entering a key from another device
-  const fileRef = useRef();
+  const [streamingText, setStreamingText]         = useState("");   // live token stream during AI stages
+  const [errorStage, setErrorStage]               = useState("");   // which stage failed
+  const fileRef         = useRef();
+  const streamingBoxRef = useRef();
+
+  const STAGE_LABEL = {
+    transcribing: "Transcription (Whisper)",
+    describing:   "Site Analysis (Gemini 2.0 Flash)",
+    scoping:      "Quantity Takeoff (Kimi K2.5)",
+    summarising:  "Scope Summary (Kimi K2.5)",
+  };
+
+  useEffect(() => {
+    if (streamingBoxRef.current)
+      streamingBoxRef.current.scrollTop = streamingBoxRef.current.scrollHeight;
+  }, [streamingText]);
 
   // Persist settings to localStorage
   useEffect(() => { try { localStorage.setItem(LS.rates,       JSON.stringify(rates));       } catch {} }, [rates]);
@@ -960,7 +1008,8 @@ export default function FBSQuoteScoper() {
 
   const runSummaryPipeline = async () => {
     if (audioClips.length === 0) { setError("Upload a WAV or video file with audio to use Scope Summary mode."); return; }
-    setError(""); setScopeData(null); setQuoteData(null); setSummaryData(null); setTranscriptData(null); setDescriptionData(null);
+    setError(""); setErrorStage(""); setStreamingText("");
+    setScopeData(null); setQuoteData(null); setSummaryData(null); setTranscriptData(null); setDescriptionData(null);
 
     try {
       setTab("quote");
@@ -992,6 +1041,7 @@ export default function FBSQuoteScoper() {
       setSummaryData(result.summary);
       setStage("done");
     } catch (e) {
+      setErrorStage(stage);
       setError(e.message);
       setStage("error");
     }
@@ -999,7 +1049,8 @@ export default function FBSQuoteScoper() {
 
   const runPipeline = async () => {
     if (images.length === 0 && audioClips.length === 0) { setError("Upload at least one photo, video, or WAV audio file."); return; }
-    setError(""); setScopeData(null); setQuoteData(null); setTranscriptData(null); setDescriptionData(null);
+    setError(""); setErrorStage(""); setStreamingText("");
+    setScopeData(null); setQuoteData(null); setTranscriptData(null); setDescriptionData(null);
     const hasAudio = audioClips.length > 0;
 
     try {
@@ -1044,12 +1095,18 @@ export default function FBSQuoteScoper() {
           const segImages = images.filter(img => img.segmentId === segId);
           const segLabel  = segImages[0]?.segmentLabel || `Segment ${segId + 1}`;
           setDescribeSegProgress({ cur: i + 1, total: segIds.length });
-          const result = await callBackend("/api/describe", {
-            images: segImages.map(img => ({ b64: img.b64, type: img.type })),
-            ...(jobDescription.trim() && { jobDescription: jobDescription.trim() }),
-          });
-          parts.push(`=== SEGMENT ${segId + 1}/${segIds.length} (${segLabel}) ===\n${result.description}`);
-          if (result.truncated) truncated = true;
+          setStreamingText("");
+          let segResult;
+          await callBackendStream(
+            "/api/describe",
+            { images: segImages.map(img => ({ b64: img.b64, type: img.type })),
+              ...(jobDescription.trim() && { jobDescription: jobDescription.trim() }) },
+            token  => setStreamingText(prev => prev + token),
+            result => { segResult = result; }
+          );
+          if (!segResult) throw new Error("No result from Gemini for segment " + (i + 1));
+          parts.push(`=== SEGMENT ${segId + 1}/${segIds.length} (${segLabel}) ===\n${segResult.description}`);
+          if (segResult.truncated) truncated = true;
         }
         description = parts.join("\n\n");
         setDescribeSegProgress(null);
@@ -1072,22 +1129,34 @@ export default function FBSQuoteScoper() {
           setDescribeSegProgress({ cur: 0, total: batches.length });
           for (let i = 0; i < batches.length; i++) {
             setDescribeSegProgress({ cur: i + 1, total: batches.length });
-            const result = await callBackend("/api/describe", {
-              images: batches[i],
-              ...(jobDescription.trim() && { jobDescription: jobDescription.trim() }),
-            });
-            parts.push(`=== BATCH ${i + 1}/${batches.length} ===\n${result.description}`);
-            if (result.truncated) truncated = true;
+            setStreamingText("");
+            let batchResult;
+            await callBackendStream(
+              "/api/describe",
+              { images: batches[i],
+                ...(jobDescription.trim() && { jobDescription: jobDescription.trim() }) },
+              token  => setStreamingText(prev => prev + token),
+              result => { batchResult = result; }
+            );
+            if (!batchResult) throw new Error("No result from Gemini for batch " + (i + 1));
+            parts.push(`=== BATCH ${i + 1}/${batches.length} ===\n${batchResult.description}`);
+            if (batchResult.truncated) truncated = true;
           }
           description = parts.join("\n\n");
           setDescribeSegProgress(null);
         } else {
-          const result = await callBackend("/api/describe", {
-            images: allImgs,
-            ...(jobDescription.trim() && { jobDescription: jobDescription.trim() }),
-          });
-          description = result.description;
-          truncated   = result.truncated;
+          setStreamingText("");
+          let descResult;
+          await callBackendStream(
+            "/api/describe",
+            { images: allImgs,
+              ...(jobDescription.trim() && { jobDescription: jobDescription.trim() }) },
+            token  => setStreamingText(prev => prev + token),
+            result => { descResult = result; }
+          );
+          if (!descResult) throw new Error("No result from Gemini");
+          description = descResult.description;
+          truncated   = descResult.truncated;
         }
       }
       } // end else (images.length > 0)
@@ -1097,11 +1166,18 @@ export default function FBSQuoteScoper() {
 
       // Stage 3 — Kimi K2.5: text description → quantity takeoff (AI self-assesses complexity)
       setStage("scoping");
-      const scope = await callBackend("/api/scope", {
-        description,
-        ...(jobDescription.trim() && { jobDescription: jobDescription.trim() }),
-        ...(transcript            && { transcript }),
-      });
+      setStreamingText("");
+      let scopeResult;
+      await callBackendStream(
+        "/api/scope",
+        { description,
+          ...(jobDescription.trim() && { jobDescription: jobDescription.trim() }),
+          ...(transcript            && { transcript }) },
+        token  => setStreamingText(prev => prev + token),
+        result => { scopeResult = result; }
+      );
+      if (!scopeResult) throw new Error("No result from Kimi");
+      const scope = scopeResult;
       setScopeData(scope);
       setJobSummary(prev => prev.trim() ? prev
         : (scope.scope_summary?.split(/\s+/).slice(0, 6).join(" ") ?? ""));
@@ -1112,6 +1188,7 @@ export default function FBSQuoteScoper() {
       setQuoteData(quote);
       setStage("done");
     } catch (e) {
+      setErrorStage(stage);
       setError(e.message);
       setStage("error");
     }
@@ -1713,10 +1790,48 @@ export default function FBSQuoteScoper() {
                 </div>
               )}
 
+              {/* ── Live AI output pane ── */}
+              {(stage === "describing" || stage === "scoping" || stage === "summarising") && streamingText && (
+                <div style={{ marginTop: 8, marginBottom: 8, background: "#080B10",
+                  border: "1px solid #1E2535", borderRadius: 6, padding: "12px 16px" }}>
+                  <div style={{ fontSize: 10, fontFamily: "'DM Mono'", color: "#4B5563",
+                    textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 8 }}>
+                    {stage === "describing" ? "Gemini · Live Output" : "Kimi K2.5 · Live Output"}
+                  </div>
+                  <pre
+                    ref={streamingBoxRef}
+                    style={{ margin: 0, maxHeight: 220, overflowY: "auto", fontSize: 12,
+                      lineHeight: 1.6, color: "#6EE7B7", fontFamily: "'DM Mono', monospace",
+                      whiteSpace: "pre-wrap", wordBreak: "break-word" }}
+                  >
+                    {streamingText}
+                    <span style={{ display: "inline-block", width: 8, height: 13,
+                      background: "#6EE7B7", marginLeft: 2, verticalAlign: "text-bottom",
+                      animation: "pulse 1s ease-in-out infinite" }} />
+                  </pre>
+                </div>
+              )}
+
               {error && (
-                <div style={{ background: "#DC262611", border: `1px solid #DC262633`,
-                  borderRadius: 6, padding: "12px 16px", color: C.red, fontSize: 13, marginBottom: 16 }}>
-                  ⚠ {error}
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 12,
+                  background: "#450A0A", border: "1px solid #DC2626",
+                  borderRadius: 6, padding: "14px 16px", marginBottom: 20 }}>
+                  <span style={{ fontSize: 18, lineHeight: 1, flexShrink: 0 }}>⚠</span>
+                  <div style={{ flex: 1 }}>
+                    {errorStage && (
+                      <div style={{ fontSize: 10, fontFamily: "'DM Mono'", color: "#FCA5A5",
+                        textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 4 }}>
+                        Failed during · {STAGE_LABEL[errorStage] || errorStage}
+                      </div>
+                    )}
+                    <div style={{ fontSize: 13, color: "#FEF2F2", lineHeight: 1.5 }}>{error}</div>
+                  </div>
+                  <button
+                    onClick={() => { setError(""); setErrorStage(""); }}
+                    style={{ background: "none", border: "none", color: "#FCA5A5",
+                      cursor: "pointer", fontSize: 16, padding: "0 2px", flexShrink: 0, lineHeight: 1 }}
+                    aria-label="Dismiss error"
+                  >✕</button>
                 </div>
               )}
 

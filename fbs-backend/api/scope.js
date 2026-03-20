@@ -214,7 +214,7 @@ module.exports = async function handler(req, res) {
     return res.status(401).json({ error: "Unauthorised" });
   }
 
-  const { description, jobDescription, transcript, refinements } = req.body;
+  const { description, jobDescription, transcript, refinements, stream: streamMode } = req.body;
   if (!description) {
     return res.status(400).json({ error: "description (site inspection report) is required" });
   }
@@ -236,23 +236,116 @@ module.exports = async function handler(req, res) {
 
   const promptText = `${contextParts.join("\n\n")}\n\n${SCOPE_PROMPT}`;
 
+  const openRouterHeaders = {
+    "Content-Type": "application/json",
+    "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
+    "HTTP-Referer": "https://fallowbuildingservices.co.uk",
+    "X-Title": "FBS Quote Scoper"
+  };
+
+  // Shared parse + normalise logic used by both streaming and non-streaming paths
+  function parseAndNormalise(raw, finishReason) {
+    console.log("Kimi raw response:", raw.slice(0, 500));
+    console.log("Finish reason:", finishReason);
+    const clean = raw.replace(/```json|```/g, "").trim();
+    const start = clean.indexOf("{");
+    const end = clean.lastIndexOf("}");
+    if (start === -1 || end === -1) {
+      throw new Error(`No JSON object found. finish_reason=${finishReason} raw=${raw.slice(0, 200)}`);
+    }
+    const parsed = JSON.parse(clean.slice(start, end + 1));
+
+    if (parsed.items) {
+      parsed.items = parsed.items.map(item => {
+        const paradigm = VALID_PARADIGMS.includes(item.paradigm)
+          ? item.paradigm
+          : (UNIT_TO_PARADIGM[(item.unit || "").toLowerCase()] || "A");
+        return { ...item, confidence: item.confidence || "high", paradigm };
+      });
+    }
+
+    if (!parsed.complexity || !VALID_TIERS.includes(parsed.complexity)) {
+      console.warn("Kimi returned unexpected complexity:", parsed.complexity, "— defaulting to 'like-for-like swap'");
+      parsed.complexity = "like-for-like swap";
+    }
+
+    return parsed;
+  }
+
+  // ── Streaming path ─────────────────────────────────────────────────────────
+  if (streamMode) {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders();
+
+    try {
+      const response = await fetch(OPENROUTER_URL, {
+        method: "POST",
+        headers: openRouterHeaders,
+        body: JSON.stringify({
+          model: MODEL,
+          max_tokens: 6000,
+          temperature: 0.1,
+          stream: true,
+          messages: [{ role: "user", content: promptText }]
+        }),
+      });
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        res.write(`data: ${JSON.stringify({ type: "error", error: err?.error?.message || `Kimi API error ${response.status}` })}\n\n`);
+        return res.end();
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let accumulated = "";
+      let finishReason = null;
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop(); // hold incomplete line
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const payload = line.slice(6).trim();
+          if (payload === "[DONE]") continue;
+          let parsed;
+          try { parsed = JSON.parse(payload); } catch { continue; }
+          const token = parsed.choices?.[0]?.delta?.content || "";
+          finishReason = parsed.choices?.[0]?.finish_reason || finishReason;
+          if (!token) continue;
+          accumulated += token;
+          res.write(`data: ${JSON.stringify({ type: "token", content: token })}\n\n`);
+        }
+      }
+
+      const result = parseAndNormalise(accumulated, finishReason);
+      res.write(`data: ${JSON.stringify({ type: "done", result })}\n\n`);
+      res.end();
+
+    } catch (err) {
+      console.error("scope stream error:", err);
+      res.write(`data: ${JSON.stringify({ type: "error", error: err.message })}\n\n`);
+      res.end();
+    }
+    return;
+  }
+
+  // ── Non-streaming path (unchanged) ────────────────────────────────────────
   try {
     const response = await fetch(OPENROUTER_URL, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
-        "HTTP-Referer": "https://fallowbuildingservices.co.uk",
-        "X-Title": "FBS Quote Scoper"
-      },
+      headers: openRouterHeaders,
       body: JSON.stringify({
         model: MODEL,
         max_tokens: 6000,
         temperature: 0.1,
-        messages: [{
-          role: "user",
-          content: promptText
-        }]
+        messages: [{ role: "user", content: promptText }]
       })
     });
 
@@ -263,33 +356,7 @@ module.exports = async function handler(req, res) {
 
     const data = await response.json();
     const raw = data.choices?.[0]?.message?.content || "";
-    console.log("Kimi raw response:", raw.slice(0, 500));
-    console.log("Finish reason:", data.choices?.[0]?.finish_reason);
-    const clean = raw.replace(/```json|```/g, "").trim();
-    const start = clean.indexOf("{");
-    const end = clean.lastIndexOf("}");
-    if (start === -1 || end === -1) throw new Error(`No JSON object found. finish_reason=${data.choices?.[0]?.finish_reason} raw=${raw.slice(0, 200)}`);
-    const parsed = JSON.parse(clean.slice(start, end + 1));
-
-    // Ensure every item has confidence + paradigm fields
-    if (parsed.items) {
-      parsed.items = parsed.items.map(item => {
-        const paradigm = VALID_PARADIGMS.includes(item.paradigm)
-          ? item.paradigm
-          : (UNIT_TO_PARADIGM[(item.unit || "").toLowerCase()] || "A");
-        return {
-          ...item,
-          confidence: item.confidence || "high",
-          paradigm,
-        };
-      });
-    }
-
-    // Validate and normalise complexity tier — fallback if Kimi returns unexpected value
-    if (!parsed.complexity || !VALID_TIERS.includes(parsed.complexity)) {
-      console.warn("Kimi returned unexpected complexity:", parsed.complexity, "— defaulting to 'like-for-like swap'");
-      parsed.complexity = "like-for-like swap";
-    }
+    const parsed = parseAndNormalise(raw, data.choices?.[0]?.finish_reason);
 
     return res.status(200).json(parsed);
 
