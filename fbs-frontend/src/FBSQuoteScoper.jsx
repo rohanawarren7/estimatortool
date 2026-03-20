@@ -41,47 +41,87 @@ function mergeHistories(local, remote) {
 //  Finish materials (tiles, sanitaryware, boards) are PC sums — not in rate card.
 // ─────────────────────────────────────────────────────────────────────────────
 const DEFAULT_RATES = [
-  { trade: "Plastering / Skimming",          unit: "m²",  labour: 12, materials: 4  },
-  { trade: "Tiling (floor)",                 unit: "m²",  labour: 15, materials: 12 },
-  { trade: "Tiling (wall)",                  unit: "m²",  labour: 18, materials: 10 },
-  { trade: "Painting & Decorating",          unit: "m²",  labour: 8,  materials: 4  },
-  { trade: "First Fix Electrical",           unit: "hrs", labour: 25, materials: 8  },
-  { trade: "Second Fix Electrical",          unit: "hrs", labour: 31, materials: 6  },
-  { trade: "Plumbing",                       unit: "hrs", labour: 25, materials: 12 },
-  { trade: "Carpentry / Joinery",            unit: "hrs", labour: 25, materials: 5  },
-  { trade: "Screeding",                      unit: "m²",  labour: 8,  materials: 5  },
-  { trade: "Boarding / Dry Lining",          unit: "m²",  labour: 10, materials: 6  },
-  { trade: "Demolition / Strip Out",         unit: "hrs", labour: 14, materials: 0  },
-  { trade: "General Labour",                 unit: "hrs", labour: 14, materials: 0  },
-  { trade: "HVAC / Mechanical Ventilation",  unit: "hrs", labour: 28, materials: 10 },
-  { trade: "Ductwork Installation",          unit: "hrs", labour: 25, materials: 15 },
-  { trade: "Fire Protection / Sprinklers",   unit: "hrs", labour: 28, materials: 12 },
-  { trade: "Insulation (thermal/acoustic)",  unit: "m²",  labour: 6,  materials: 8  },
-  { trade: "Groundworks / Excavation",       unit: "hrs", labour: 18, materials: 2  },
-  { trade: "Drainage",                       unit: "hrs", labour: 25, materials: 8  },
-  { trade: "External Works / Landscaping",   unit: "hrs", labour: 16, materials: 3  },
-  { trade: "Brickwork / Blockwork",          unit: "m²",  labour: 25, materials: 8  },
-  { trade: "Roofing",                        unit: "m²",  labour: 20, materials: 15 },
-  { trade: "Flooring (LVT / Engineered)",    unit: "m²",  labour: 10, materials: 18 },
-  { trade: "Steelwork / Structural",         unit: "hrs", labour: 30, materials: 5  },
-  { trade: "Suspended Ceilings",             unit: "m²",  labour: 12, materials: 10 },
+  // ── Area-based (Paradigm B) ────────────────────────────────────────────────
+  { trade: "Plastering / Skimming",           unit: "m²",   paradigm: "B", labour: 12,  materials: 4,   wasteFactor: 1.10 },
+  { trade: "Tiling (floor)",                  unit: "m²",   paradigm: "B", labour: 15,  materials: 12,  wasteFactor: 1.12 },
+  { trade: "Tiling (wall)",                   unit: "m²",   paradigm: "B", labour: 18,  materials: 10,  wasteFactor: 1.12 },
+  { trade: "Painting & Decorating",           unit: "m²",   paradigm: "B", labour: 8,   materials: 4,   wasteFactor: 1.10 },
+  { trade: "Screeding",                       unit: "m²",   paradigm: "B", labour: 8,   materials: 5,   wasteFactor: 1.10 },
+  { trade: "Boarding / Dry Lining",           unit: "m²",   paradigm: "B", labour: 10,  materials: 6,   wasteFactor: 1.10 },
+  { trade: "Insulation (thermal/acoustic)",   unit: "m²",   paradigm: "B", labour: 6,   materials: 8,   wasteFactor: 1.10 },
+  { trade: "Brickwork / Blockwork",           unit: "m²",   paradigm: "B", labour: 25,  materials: 8,   wasteFactor: 1.10 },
+  { trade: "Roofing",                         unit: "m²",   paradigm: "B", labour: 20,  materials: 15,  wasteFactor: 1.12 },
+  { trade: "Flooring (LVT / Engineered)",     unit: "m²",   paradigm: "B", labour: 10,  materials: 18,  wasteFactor: 1.10 },
+  { trade: "Flooring (carpet)",               unit: "m²",   paradigm: "B", labour: 6,   materials: 12,  wasteFactor: 1.10 },
+  { trade: "Suspended Ceilings",              unit: "m²",   paradigm: "B", labour: 12,  materials: 10,  wasteFactor: 1.08 },
+  { trade: "External Rendering",              unit: "m²",   paradigm: "B", labour: 14,  materials: 8,   wasteFactor: 1.10 },
+  { trade: "Waterproofing / Tanking",         unit: "m²",   paradigm: "B", labour: 12,  materials: 10,  wasteFactor: 1.10 },
+  { trade: "Underfloor Heating (electric)",   unit: "m²",   paradigm: "B", labour: 8,   materials: 20,  wasteFactor: 1.05 },
+  { trade: "Underfloor Heating (wet)",        unit: "m²",   paradigm: "B", labour: 10,  materials: 25,  wasteFactor: 1.05 },
+  { trade: "External Cleaning / Jet Wash",    unit: "m²",   paradigm: "B", labour: 3,   materials: 1,   wasteFactor: 1.00 },
+  // ── Hourly (Paradigm A) ────────────────────────────────────────────────────
+  { trade: "First Fix Electrical",            unit: "hrs",  paradigm: "A", labour: 25,  materials: 8,   wasteFactor: 1.05 },
+  { trade: "Second Fix Electrical",           unit: "hrs",  paradigm: "A", labour: 31,  materials: 6,   wasteFactor: 1.05 },
+  { trade: "Plumbing",                        unit: "hrs",  paradigm: "A", labour: 25,  materials: 12,  wasteFactor: 1.10 },
+  { trade: "Carpentry / Joinery",             unit: "hrs",  paradigm: "A", labour: 25,  materials: 5,   wasteFactor: 1.08 },
+  { trade: "Demolition / Strip Out",          unit: "hrs",  paradigm: "A", labour: 14,  materials: 0,   wasteFactor: 1.00 },
+  { trade: "Soft Strip / Careful Demolition", unit: "hrs",  paradigm: "A", labour: 16,  materials: 0,   wasteFactor: 1.00 },
+  { trade: "General Labour",                  unit: "hrs",  paradigm: "A", labour: 14,  materials: 0,   wasteFactor: 1.00 },
+  { trade: "HVAC / Mechanical Ventilation",   unit: "hrs",  paradigm: "A", labour: 28,  materials: 10,  wasteFactor: 1.08 },
+  { trade: "Ductwork Installation",           unit: "hrs",  paradigm: "A", labour: 25,  materials: 15,  wasteFactor: 1.08 },
+  { trade: "Fire Protection / Sprinklers",    unit: "hrs",  paradigm: "A", labour: 28,  materials: 12,  wasteFactor: 1.08 },
+  { trade: "Groundworks / Excavation",        unit: "hrs",  paradigm: "A", labour: 18,  materials: 2,   wasteFactor: 1.00 },
+  { trade: "Drainage",                        unit: "hrs",  paradigm: "A", labour: 25,  materials: 8,   wasteFactor: 1.08 },
+  { trade: "External Works / Landscaping",    unit: "hrs",  paradigm: "A", labour: 16,  materials: 3,   wasteFactor: 1.05 },
+  { trade: "Steelwork / Structural",          unit: "hrs",  paradigm: "A", labour: 30,  materials: 5,   wasteFactor: 1.05 },
+  { trade: "Data / AV / Low Voltage",         unit: "hrs",  paradigm: "A", labour: 25,  materials: 5,   wasteFactor: 1.05 },
+  { trade: "Kitchen Units Installation",      unit: "hrs",  paradigm: "A", labour: 25,  materials: 4,   wasteFactor: 1.05 },
+  { trade: "Fit-out Joinery",                 unit: "hrs",  paradigm: "A", labour: 28,  materials: 8,   wasteFactor: 1.08 },
+  // ── Per item / point (Paradigm C) ─────────────────────────────────────────
+  { trade: "Bathroom Suite Installation",     unit: "item", paradigm: "C", labour: 250, materials: 20,  wasteFactor: 1.05 },
+  { trade: "Door Hanging / Ironmongery",      unit: "door", paradigm: "C", labour: 80,  materials: 15,  wasteFactor: 1.05 },
+  { trade: "Window / Door Frame Install",     unit: "unit", paradigm: "C", labour: 150, materials: 10,  wasteFactor: 1.05 },
+  // ── Linear (Paradigm D) ───────────────────────────────────────────────────
+  { trade: "Skirting / Architrave",           unit: "m",    paradigm: "D", labour: 6,   materials: 4,   wasteFactor: 1.10 },
+  { trade: "Coving / Cornicing",              unit: "m",    paradigm: "D", labour: 5,   materials: 3,   wasteFactor: 1.10 },
+  { trade: "Drainage (linear)",               unit: "m",    paradigm: "D", labour: 20,  materials: 15,  wasteFactor: 1.08 },
+  // ── Fixed / lump sum (Paradigm E) ────────────────────────────────────────
+  { trade: "Electrical Testing & Cert",       unit: "fixed",paradigm: "E", labour: 400, materials: 20,  wasteFactor: 1.00 },
+  { trade: "Scaffolding",                     unit: "fixed",paradigm: "E", labour: 150, materials: 500, wasteFactor: 1.00 },
+  { trade: "MVHR System (supply & install)",  unit: "fixed",paradigm: "E", labour: 800, materials: 400, wasteFactor: 1.05 },
+  { trade: "Temporary Works / Shoring",       unit: "fixed",paradigm: "E", labour: 600, materials: 200, wasteFactor: 1.00 },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  PRICING ENGINE — deterministic, no API call
 // ─────────────────────────────────────────────────────────────────────────────
 const TRADE_CATEGORY = {
-  "Plumbing":                      "mechanical",
-  "HVAC / Mechanical Ventilation": "mechanical",
-  "Drainage":                      "mechanical",
-  "First Fix Electrical":          "electrical",
-  "Second Fix Electrical":         "electrical",
-  "Fire Protection / Sprinklers":  "electrical",
-  "Demolition / Strip Out":        "structural",
-  "Brickwork / Blockwork":         "structural",
-  "Steelwork / Structural":        "structural",
-  "Groundworks / Excavation":      "structural",
-  "Roofing":                       "structural",
+  // Mechanical
+  "Plumbing":                        "mechanical",
+  "HVAC / Mechanical Ventilation":   "mechanical",
+  "Ductwork Installation":           "mechanical",
+  "Drainage":                        "mechanical",
+  "Drainage (linear)":               "mechanical",
+  "Underfloor Heating (wet)":        "mechanical",
+  "MVHR System (supply & install)":  "mechanical",
+  "Bathroom Suite Installation":     "mechanical",
+  // Electrical
+  "First Fix Electrical":            "electrical",
+  "Second Fix Electrical":           "electrical",
+  "Fire Protection / Sprinklers":    "electrical",
+  "Data / AV / Low Voltage":         "electrical",
+  "Underfloor Heating (electric)":   "electrical",
+  "Electrical Testing & Cert":       "electrical",
+  // Structural
+  "Demolition / Strip Out":          "structural",
+  "Soft Strip / Careful Demolition": "structural",
+  "Brickwork / Blockwork":           "structural",
+  "Steelwork / Structural":          "structural",
+  "Groundworks / Excavation":        "structural",
+  "Roofing":                         "structural",
+  "Waterproofing / Tanking":         "structural",
+  "Temporary Works / Shoring":       "structural",
+  "Scaffolding":                     "structural",
 };
 
 const COMPLEXITY_MULTIPLIERS = {
@@ -92,21 +132,23 @@ const COMPLEXITY_MULTIPLIERS = {
 };
 
 function priceScope(items, rates, complexity, sitePrelimsPct, overheadPct, profitPct, cisPct) {
-  const rateMap   = Object.fromEntries(rates.map(r => [r.trade, r]));
-  const mults     = COMPLEXITY_MULTIPLIERS[complexity] || COMPLEXITY_MULTIPLIERS["like-for-like swap"];
+  const rateMap = Object.fromEntries(rates.map(r => [r.trade, r]));
+  const mults   = COMPLEXITY_MULTIPLIERS[complexity] || COMPLEXITY_MULTIPLIERS["like-for-like swap"];
 
   const line_items = items.map(item => {
-    const r          = rateMap[item.trade] || { labour: 0, materials: 0 };
-    const category   = TRADE_CATEGORY[item.trade] || "core";
-    const multiplier = mults[category];
-    const adj_qty    = Math.round(item.quantity * multiplier * 10) / 10;
+    const r           = rateMap[item.trade] || { labour: 0, materials: 0, wasteFactor: 1.0 };
+    const category    = TRADE_CATEGORY[item.trade] || "core";
+    const multiplier  = mults[category];
+    const wasteFactor = r.wasteFactor || 1.0;
+    const adj_qty     = Math.round(item.quantity * multiplier * 10) / 10;
     const labour_cost    = Math.round(adj_qty * r.labour);
-    const materials_cost = Math.round(adj_qty * (r.materials || 0));
+    const materials_cost = Math.round(adj_qty * (r.materials || 0) * wasteFactor);
     return {
       ...item,
-      quantity:      adj_qty,
-      labour_rate:   r.labour,
+      quantity:       adj_qty,
+      labour_rate:    r.labour,
       materials_rate: r.materials || 0,
+      waste_factor:   wasteFactor,
       labour_cost,
       materials_cost,
       cost: labour_cost + materials_cost,
@@ -151,11 +193,26 @@ function loadLS(key, fallback) {
 
 function migrateRates(stored) {
   if (!stored) return DEFAULT_RATES;
-  // Old format had a single `rate` field — map it to labour, set materials: 0
-  if (stored[0]?.rate !== undefined && stored[0]?.labour === undefined) {
-    return stored.map(r => ({ trade: r.trade, unit: r.unit, labour: r.rate, materials: 0 }));
+
+  // v1 → v2: single `rate` field to labour + materials
+  let rates = stored;
+  if (rates[0]?.rate !== undefined && rates[0]?.labour === undefined) {
+    rates = rates.map(r => ({ trade: r.trade, unit: r.unit, labour: r.rate, materials: 0 }));
   }
-  return stored;
+
+  // v2 → v3: patch paradigm + wasteFactor onto existing entries
+  const defaultMap = Object.fromEntries(DEFAULT_RATES.map(r => [r.trade, r]));
+  rates = rates.map(r => ({
+    ...r,
+    paradigm:    r.paradigm    ?? (defaultMap[r.trade]?.paradigm    || "A"),
+    wasteFactor: r.wasteFactor ?? (defaultMap[r.trade]?.wasteFactor || 1.0),
+  }));
+
+  // Append any new v3 trades not present in stored rates
+  const storedTrades = new Set(rates.map(r => r.trade));
+  const newTrades = DEFAULT_RATES.filter(r => !storedTrades.has(r.trade));
+
+  return [...rates, ...newTrades];
 }
 
 function resizeImage(file, maxDim = 768) {
