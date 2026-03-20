@@ -420,11 +420,18 @@ async function callBackend(path, body) {
 }
 
 // ─── UI COMPONENTS ────────────────────────────────────────────────────────────
-function SlackSendPanel({ text, channel, setChannel, recentChannels, status, onSend, onClose }) {
+function SlackSendPanel({ text, channel, setChannel, recentChannels, availableChannels, channelsLoading, status, onSend, onClose }) {
   const C = { card: "#161B27", border: "#1E2535", subtle: "#374151", muted: "#6B7280", amber: "#F59E0B", text: "#E5E7EB", green: "#10B981", red: "#EF4444" };
   const sending = status === "sending";
   const sent    = status === "sent";
   const errMsg  = status.startsWith("error:") ? status.slice(6) : null;
+
+  const hasChannels = availableChannels && availableChannels.length > 0;
+  const recentSet   = new Set(recentChannels.map(c => c.replace(/^#/, "")));
+  const otherChannels = hasChannels
+    ? availableChannels.filter(c => !recentSet.has(c.name))
+    : [];
+
   return (
     <div style={{ marginTop: 10, background: "#0F1117", border: `1px solid #4A154B55`,
       borderRadius: 6, padding: "14px 16px", animation: "slideIn 0.15s ease" }}>
@@ -436,28 +443,43 @@ function SlackSendPanel({ text, channel, setChannel, recentChannels, status, onS
         <button onClick={onClose} style={{ background: "none", border: "none",
           color: C.muted, cursor: "pointer", fontSize: 14, padding: "0 2px" }}>✕</button>
       </div>
-      {recentChannels.length > 0 && (
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
-          {recentChannels.map(ch => (
-            <button key={ch} onClick={() => setChannel(ch)}
-              style={{ background: channel === ch ? "#4A154B33" : "transparent",
-                border: `1px solid ${channel === ch ? "#9B59B6" : C.subtle}`,
-                borderRadius: 4, padding: "3px 10px", color: channel === ch ? "#9B59B6" : C.muted,
-                fontFamily: "'DM Mono'", fontSize: 11, cursor: "pointer" }}>
-              {ch}
-            </button>
-          ))}
-        </div>
-      )}
+
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-        <input
-          value={channel}
-          onChange={e => setChannel(e.target.value)}
-          placeholder="#channel-name"
-          style={{ flex: 1, background: C.card, border: `1px solid ${C.subtle}`,
-            borderRadius: 4, padding: "7px 10px", color: C.text,
-            fontFamily: "'DM Mono'", fontSize: 12 }}
-        />
+        {hasChannels ? (
+          <select
+            value={channel}
+            onChange={e => setChannel(e.target.value)}
+            style={{ flex: 1, background: C.card, border: `1px solid ${C.subtle}`,
+              borderRadius: 4, padding: "7px 10px", color: channel ? C.text : C.muted,
+              fontFamily: "'DM Mono'", fontSize: 12, cursor: "pointer" }}>
+            <option value="">Select a channel…</option>
+            {recentChannels.length > 0 && (
+              <optgroup label="Recent">
+                {recentChannels.map(ch => (
+                  <option key={ch} value={ch}>{ch}</option>
+                ))}
+              </optgroup>
+            )}
+            <optgroup label={recentChannels.length > 0 ? "All channels" : "Channels"}>
+              {otherChannels.map(c => (
+                <option key={c.id} value={`#${c.name}`}>
+                  {c.isPrivate ? "🔒 " : "#"}{c.name}
+                </option>
+              ))}
+            </optgroup>
+          </select>
+        ) : (
+          <input
+            value={channel}
+            onChange={e => setChannel(e.target.value)}
+            placeholder={channelsLoading ? "Loading channels…" : "#channel-name"}
+            disabled={channelsLoading}
+            style={{ flex: 1, background: C.card, border: `1px solid ${C.subtle}`,
+              borderRadius: 4, padding: "7px 10px", color: C.text,
+              fontFamily: "'DM Mono'", fontSize: 12,
+              opacity: channelsLoading ? 0.5 : 1 }}
+          />
+        )}
         <button onClick={() => onSend(text)} disabled={sending || !channel.trim()}
           style={{ background: sending || !channel.trim() ? C.subtle : "#4A154B",
             border: "none", borderRadius: 4, padding: "7px 18px",
@@ -467,6 +489,7 @@ function SlackSendPanel({ text, channel, setChannel, recentChannels, status, onS
           {sending ? "Sending…" : sent ? "✓ Sent" : "Send"}
         </button>
       </div>
+
       {errMsg && (
         <div style={{ marginTop: 8, fontSize: 11, color: C.red, fontFamily: "'DM Mono'" }}>
           ⚠ {errMsg}
@@ -562,6 +585,8 @@ export default function FBSQuoteScoper() {
   const [slackStatus, setSlackStatus]             = useState("");      // "" | "sending" | "sent" | "error:msg"
   const [recentSlackChannels, setRecentSlackChannels] = useState(() => loadLS(LS.slackChannels, []));
   const [historySlackId, setHistorySlackId]       = useState(null);    // entry.id of open history Slack panel
+  const [slackAvailableChannels, setSlackAvailableChannels] = useState([]);
+  const [slackChannelsLoading, setSlackChannelsLoading]     = useState(false);
   const [transcriptData, setTranscriptData]       = useState(null);
   const [descriptionData, setDescriptionData]     = useState(null);
   const [summaryData, setSummaryData]             = useState(null);
@@ -1128,6 +1153,27 @@ export default function FBSQuoteScoper() {
     }
   };
 
+  const fetchSlackChannels = useCallback(async () => {
+    if (slackAvailableChannels.length > 0 || slackChannelsLoading) return;
+    setSlackChannelsLoading(true);
+    try {
+      const res = await fetch(`${VERCEL_BASE_URL}/api/slack`, {
+        headers: { "x-fbs-secret": FBS_SECRET },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const { channels } = await res.json();
+      setSlackAvailableChannels(channels || []);
+    } catch {
+      // silently fall back to text input
+    } finally {
+      setSlackChannelsLoading(false);
+    }
+  }, [slackAvailableChannels.length, slackChannelsLoading]);
+
+  useEffect(() => {
+    if (slackTarget !== null || historySlackId !== null) fetchSlackChannels();
+  }, [slackTarget, historySlackId, fetchSlackChannels]);
+
   const buildHistoryText = (entry) => {
     if (entry.type === "summary") {
       return `SCOPE OF WORKS — ${entry.jobRef}${entry.jobSummary ? ` — ${entry.jobSummary}` : ""}\n${"─".repeat(60)}\n${entry.summaryData}`;
@@ -1658,6 +1704,8 @@ export default function FBSQuoteScoper() {
                       text={summaryData}
                       channel={slackChannel} setChannel={setSlackChannel}
                       recentChannels={recentSlackChannels}
+                      availableChannels={slackAvailableChannels}
+                      channelsLoading={slackChannelsLoading}
                       status={slackStatus}
                       onSend={sendToSlack}
                       onClose={() => setSlackTarget(null)}
@@ -2033,6 +2081,8 @@ export default function FBSQuoteScoper() {
                       text={buildQuoteText("detailed")}
                       channel={slackChannel} setChannel={setSlackChannel}
                       recentChannels={recentSlackChannels}
+                      availableChannels={slackAvailableChannels}
+                      channelsLoading={slackChannelsLoading}
                       status={slackStatus}
                       onSend={sendToSlack}
                       onClose={() => setSlackTarget(null)}
@@ -2289,6 +2339,8 @@ export default function FBSQuoteScoper() {
                           text={buildHistoryText(entry)}
                           channel={slackChannel} setChannel={setSlackChannel}
                           recentChannels={recentSlackChannels}
+                          availableChannels={slackAvailableChannels}
+                          channelsLoading={slackChannelsLoading}
                           status={slackStatus}
                           onSend={sendToSlack}
                           onClose={() => setHistorySlackId(null)}
