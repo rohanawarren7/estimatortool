@@ -561,6 +561,7 @@ export default function FBSQuoteScoper() {
   const [slackChannel, setSlackChannel]           = useState("");
   const [slackStatus, setSlackStatus]             = useState("");      // "" | "sending" | "sent" | "error:msg"
   const [recentSlackChannels, setRecentSlackChannels] = useState(() => loadLS(LS.slackChannels, []));
+  const [historySlackId, setHistorySlackId]       = useState(null);    // entry.id of open history Slack panel
   const [transcriptData, setTranscriptData]       = useState(null);
   const [descriptionData, setDescriptionData]     = useState(null);
   const [summaryData, setSummaryData]             = useState(null);
@@ -773,27 +774,43 @@ export default function FBSQuoteScoper() {
   };
 
   const saveToHistory = () => {
-    if (!quoteData || !scopeData) return;
-    const entry = {
-      id:              `${jobRef}-${Date.now()}`,
-      jobRef,
-      jobSummary,
-      date:            new Date().toISOString(),
-      total:           quoteData.total,
-      complexity:      quoteData.complexity,
-      scopeSummary:    scopeData.scope_summary,
-      quoteData,
-      scopeData,
-      descriptionData,
-    };
+    const isSummary = pipelineMode === "summary" && summaryData;
+    const isQuote   = quoteData && scopeData;
+    if (!isSummary && !isQuote) return;
+
+    const entry = isSummary
+      ? {
+          id:           `${jobRef}-${Date.now()}`,
+          jobRef,
+          jobSummary,
+          date:         new Date().toISOString(),
+          type:         "summary",
+          total:        null,
+          complexity:   null,
+          scopeSummary: summaryData.split("\n").find(l => l.trim()) || summaryData.slice(0, 80),
+          summaryData,
+          transcriptData,
+        }
+      : {
+          id:           `${jobRef}-${Date.now()}`,
+          jobRef,
+          jobSummary,
+          date:         new Date().toISOString(),
+          type:         "quote",
+          total:        quoteData.total,
+          complexity:   quoteData.complexity,
+          scopeSummary: scopeData.scope_summary,
+          quoteData,
+          scopeData,
+          descriptionData,
+        };
+
     setHistory(prev => {
       const newHistory = [entry, ...prev].slice(0, 100);
-      // Guard: if serialised history exceeds ~3.5MB, strip descriptionData from older entries
       const approxSize = JSON.stringify(newHistory).length;
       const finalHistory = approxSize > 3_500_000
         ? newHistory.map((e, i) => i < 5 ? e : { ...e, descriptionData: null })
         : newHistory;
-      // Push to remote (non-blocking — fire and forget)
       pushHistoryRemote(finalHistory, syncKey);
       return finalHistory;
     });
@@ -1109,6 +1126,41 @@ export default function FBSQuoteScoper() {
       setSlackStatus("error:" + (e.message || "Failed to post to Slack"));
       setTimeout(() => setSlackStatus(""), 6000);
     }
+  };
+
+  const buildHistoryText = (entry) => {
+    if (entry.type === "summary") {
+      return `SCOPE OF WORKS — ${entry.jobRef}${entry.jobSummary ? ` — ${entry.jobSummary}` : ""}\n${"─".repeat(60)}\n${entry.summaryData}`;
+    }
+    const q = entry.quoteData;
+    if (!q) return "";
+    const isNew = q.labour_subtotal !== undefined;
+    const lines = [
+      `FALLOW BUILDING SERVICES — QUOTE ESTIMATE`,
+      `Ref: ${entry.jobRef}${entry.jobSummary ? ` — ${entry.jobSummary}` : ""}${q.complexity ? ` · ${q.complexity}` : ""}`,
+      ``,
+      ...q.line_items.map(l => {
+        const rate = isNew ? (l.labour_rate + l.materials_rate) : (l.rate || 0);
+        const ps   = l.confidence === "low" ? " (PS)" : "";
+        return `${(l.trade + ps).padEnd(32)} ${String(l.quantity).padStart(7)} ${l.unit.padEnd(4)}  @ £${rate}/${l.unit}  =  ${fmt(l.cost)}`;
+      }),
+      `${"─".repeat(60)}`,
+      ...(isNew
+        ? [
+            `Direct Costs:          ${fmt(q.subtotal)}`,
+            `Site Prelims (${q.site_prelims_pct}%):    ${fmt(q.site_prelims_cost)}`,
+            `Company Overhead (${q.overhead_pct}%): ${fmt(q.overhead_cost)}`,
+            `Net Profit (${q.profit_pct}%):       ${fmt(q.profit_cost)}`,
+          ]
+        : [
+            `Subtotal:   ${fmt(q.subtotal)}`,
+            `Prelims (${q.prelims_pct}%): ${fmt(q.prelims_cost)}`,
+            `Margin (${q.margin_pct}%):  ${fmt(q.margin_cost)}`,
+          ]),
+      `${"═".repeat(60)}`,
+      `TOTAL (ex VAT): ${fmt(q.total)}`,
+    ];
+    return lines.join("\n");
   };
 
   const C = {
@@ -1588,6 +1640,12 @@ export default function FBSQuoteScoper() {
                           fontFamily: "'DM Mono'", fontSize: 11, cursor: "pointer" }}>
                         Slack
                       </button>
+                      <button onClick={saveToHistory}
+                        style={{ background: "#059669", border: "none",
+                          borderRadius: 4, padding: "4px 12px", color: "#fff",
+                          fontFamily: "'DM Mono'", fontSize: 11, cursor: "pointer" }}>
+                        Save
+                      </button>
                     </div>
                   </div>
                   <pre style={{ background: "#0F1117", borderRadius: 6, padding: "16px 18px",
@@ -1999,13 +2057,13 @@ export default function FBSQuoteScoper() {
                   Quote History
                 </div>
                 <div style={{ fontSize: 11, color: C.muted, fontFamily: "'DM Mono'" }}>
-                  {history.length} saved quote{history.length !== 1 ? "s" : ""}
+                  {history.length} saved {history.length !== 1 ? "items" : "item"}
                 </div>
               </div>
 
               {history.length === 0 && (
                 <div style={{ textAlign: "center", padding: "50px 20px", color: C.muted, fontSize: 13 }}>
-                  No saved quotes yet. Run a quote and click SAVE in the Quote Output tab.
+                  No saved items yet. Run a quote or scope summary and click Save.
                 </div>
               )}
 
@@ -2029,9 +2087,16 @@ export default function FBSQuoteScoper() {
                           <span style={{ fontSize: 11, color: C.muted, fontFamily: "'DM Mono'" }}>
                             {new Date(entry.date).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
                           </span>
-                          <span style={{ fontSize: 13, fontFamily: "'DM Mono'", color: C.text }}>
-                            {fmt(entry.total)}
-                          </span>
+                          {entry.type === "summary" ? (
+                            <span style={{ fontSize: 10, fontFamily: "'DM Mono'", color: "#9B59B6",
+                              border: "1px solid #9B59B633", borderRadius: 3, padding: "1px 6px" }}>
+                              SCOPE
+                            </span>
+                          ) : (
+                            <span style={{ fontSize: 13, fontFamily: "'DM Mono'", color: C.text }}>
+                              {fmt(entry.total)}
+                            </span>
+                          )}
                         </div>
                         <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.5,
                           overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -2039,6 +2104,14 @@ export default function FBSQuoteScoper() {
                         </div>
                       </div>
                       <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                        <button onClick={() => { setHistorySlackId(id => id === entry.id ? null : entry.id); setExpandedHistoryId(entry.id); }}
+                          style={{ background: historySlackId === entry.id ? "#4A154B33" : "transparent",
+                            border: `1px solid ${historySlackId === entry.id ? "#9B59B6" : C.border}`,
+                            borderRadius: 4, padding: "4px 10px",
+                            color: historySlackId === entry.id ? "#9B59B6" : C.muted,
+                            fontSize: 11, fontFamily: "'DM Mono'", cursor: "pointer" }}>
+                          Slack
+                        </button>
                         <button onClick={() => setExpandedHistoryId(expandedHistoryId === entry.id ? null : entry.id)}
                           style={{ background: "transparent", border: `1px solid ${C.subtle}`,
                             borderRadius: 4, padding: "4px 12px", color: C.muted, fontSize: 11,
@@ -2082,120 +2155,166 @@ export default function FBSQuoteScoper() {
                   {expandedHistoryId === entry.id && (
                     <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, padding: 16,
                       marginBottom: 8, background: "#0F1117", animation: "slideIn 0.2s ease" }}>
-                      <div style={{ fontSize: 12, color: C.muted, marginBottom: 10, lineHeight: 1.6 }}>
-                        {entry.scopeSummary}
-                      </div>
-                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, marginBottom: 10 }}>
-                        <thead>
-                          <tr style={{ borderBottom: `1px solid #F59E0B33` }}>
-                            {["Trade", "Description", "Qty", "Unit", "Rate", "Cost"].map(h => (
-                              <th key={h} style={{ padding: "6px 8px",
-                                textAlign: ["Cost", "Rate", "Qty"].includes(h) ? "right" : "left",
-                                color: C.muted, fontFamily: "'DM Mono'", fontSize: 9,
-                                textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 400 }}>{h}</th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {entry.quoteData.line_items.map((l, i) => {
-                            const isPS      = l.confidence === "low";
-                            const totalRate = (l.labour_rate || 0) + (l.materials_rate || 0) || l.rate || 0;
-                            return (
-                              <tr key={i} style={{ borderBottom: `1px solid ${C.border}44`,
-                                background: isPS ? "#F59E0B08" : undefined }}>
-                                <td style={{ padding: "6px 8px", fontWeight: 500 }}>
-                                  {l.trade}
-                                  {isPS && <span style={{ marginLeft: 5, fontSize: 9, fontFamily: "'DM Mono'",
-                                    color: C.amber, border: `1px solid ${C.amber}55`, borderRadius: 3,
-                                    padding: "1px 4px" }}>PS</span>}
-                                </td>
-                                <td style={{ padding: "6px 8px", color: C.muted }}>{l.description}</td>
-                                <td style={{ padding: "6px 8px", fontFamily: "'DM Mono'", textAlign: "right" }}>{l.quantity}</td>
-                                <td style={{ padding: "6px 8px", color: C.muted, fontFamily: "'DM Mono'", fontSize: 10 }}>{l.unit}</td>
-                                <td style={{ padding: "6px 8px", color: C.muted, fontFamily: "'DM Mono'", textAlign: "right" }}>£{totalRate}</td>
-                                <td style={{ padding: "6px 8px", fontFamily: "'DM Mono'", textAlign: "right" }}>{fmt(l.cost)}</td>
+
+                      {/* Summary-type entry */}
+                      {entry.type === "summary" && (
+                        <>
+                          <pre style={{ fontSize: 12, color: C.text, lineHeight: 1.75, whiteSpace: "pre-wrap",
+                            fontFamily: "'DM Mono'", margin: "0 0 12px" }}>
+                            {entry.summaryData}
+                          </pre>
+                          {entry.transcriptData && (
+                            <details style={{ marginBottom: 12 }}>
+                              <summary style={{ cursor: "pointer", fontSize: 11, color: C.muted,
+                                fontFamily: "'DM Mono'", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                                🎙 Transcript
+                              </summary>
+                              <div style={{ marginTop: 6, padding: "8px 12px", background: C.card,
+                                borderRadius: 4, fontSize: 11, color: C.muted, lineHeight: 1.8, fontStyle: "italic" }}>
+                                {entry.transcriptData}
+                              </div>
+                            </details>
+                          )}
+                        </>
+                      )}
+
+                      {/* Quote-type entry */}
+                      {entry.type !== "summary" && entry.quoteData && (
+                        <>
+                          <div style={{ fontSize: 12, color: C.muted, marginBottom: 10, lineHeight: 1.6 }}>
+                            {entry.scopeSummary}
+                          </div>
+                          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, marginBottom: 10 }}>
+                            <thead>
+                              <tr style={{ borderBottom: `1px solid #F59E0B33` }}>
+                                {["Trade", "Description", "Qty", "Unit", "Rate", "Cost"].map(h => (
+                                  <th key={h} style={{ padding: "6px 8px",
+                                    textAlign: ["Cost", "Rate", "Qty"].includes(h) ? "right" : "left",
+                                    color: C.muted, fontFamily: "'DM Mono'", fontSize: 9,
+                                    textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 400 }}>{h}</th>
+                                ))}
                               </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                      <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 8 }}>
-                        {(() => {
-                          const q = entry.quoteData;
-                          const isNew = q.labour_subtotal !== undefined;
-                          if (isNew) {
-                            return (
-                              <>
-                                {[
-                                  { label: "Labour", val: q.labour_subtotal },
-                                  { label: "Materials", val: q.materials_subtotal },
-                                  { label: "Direct Costs", val: q.subtotal },
-                                  { label: `Site Prelims (${q.site_prelims_pct}%)`, val: q.site_prelims_cost },
-                                  { label: `Company Overhead (${q.overhead_pct}%)`, val: q.overhead_cost },
-                                  { label: `Net Profit (${q.profit_pct}%)`, val: q.profit_cost },
-                                ].map((row, i) => (
-                                  <div key={i} style={{ display: "flex", justifyContent: "space-between",
-                                    padding: "3px 8px", fontSize: 12, color: C.muted }}>
-                                    <span>{row.label}</span>
-                                    <span style={{ fontFamily: "'DM Mono'" }}>{fmt(row.val)}</span>
-                                  </div>
-                                ))}
-                              </>
-                            );
-                          } else {
-                            return (
-                              <>
-                                {[
-                                  { label: "Subtotal", val: q.subtotal },
-                                  { label: `Prelims (${q.prelims_pct}%)`, val: q.prelims_cost },
-                                  { label: `FBS Margin (${q.margin_pct}%)`, val: q.margin_cost },
-                                ].map((row, i) => (
-                                  <div key={i} style={{ display: "flex", justifyContent: "space-between",
-                                    padding: "3px 8px", fontSize: 12, color: C.muted }}>
-                                    <span>{row.label}</span>
-                                    <span style={{ fontFamily: "'DM Mono'" }}>{fmt(row.val)}</span>
-                                  </div>
-                                ))}
-                              </>
-                            );
-                          }
-                        })()}
-                        <div style={{ display: "flex", justifyContent: "space-between",
-                          padding: "8px", background: "#F59E0B18", borderRadius: 5,
-                          marginTop: 4, border: "1px solid #F59E0B33" }}>
-                          <span style={{ fontFamily: "'Bebas Neue'", fontSize: 15, color: C.amber }}>TOTAL (EX VAT)</span>
-                          <span style={{ fontFamily: "'Bebas Neue'", fontSize: 17, color: C.amber }}>{fmt(entry.quoteData.total)}</span>
-                        </div>
-                        {(entry.quoteData.cis_cost ?? 0) > 0 && (
-                          <div style={{ display: "flex", justifyContent: "space-between",
-                            padding: "6px 8px", marginTop: 6, fontSize: 11, color: C.muted, fontFamily: "'DM Mono'" }}>
-                            <span>CIS withheld from subbies ({entry.quoteData.cis_pct}%)</span>
-                            <span>-{fmt(entry.quoteData.cis_cost)}</span>
+                            </thead>
+                            <tbody>
+                              {entry.quoteData.line_items.map((l, i) => {
+                                const isPS      = l.confidence === "low";
+                                const totalRate = (l.labour_rate || 0) + (l.materials_rate || 0) || l.rate || 0;
+                                return (
+                                  <tr key={i} style={{ borderBottom: `1px solid ${C.border}44`,
+                                    background: isPS ? "#F59E0B08" : undefined }}>
+                                    <td style={{ padding: "6px 8px", fontWeight: 500 }}>
+                                      {l.trade}
+                                      {isPS && <span style={{ marginLeft: 5, fontSize: 9, fontFamily: "'DM Mono'",
+                                        color: C.amber, border: `1px solid ${C.amber}55`, borderRadius: 3,
+                                        padding: "1px 4px" }}>PS</span>}
+                                    </td>
+                                    <td style={{ padding: "6px 8px", color: C.muted }}>{l.description}</td>
+                                    <td style={{ padding: "6px 8px", fontFamily: "'DM Mono'", textAlign: "right" }}>{l.quantity}</td>
+                                    <td style={{ padding: "6px 8px", color: C.muted, fontFamily: "'DM Mono'", fontSize: 10 }}>{l.unit}</td>
+                                    <td style={{ padding: "6px 8px", color: C.muted, fontFamily: "'DM Mono'", textAlign: "right" }}>£{totalRate}</td>
+                                    <td style={{ padding: "6px 8px", fontFamily: "'DM Mono'", textAlign: "right" }}>{fmt(l.cost)}</td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                          <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 8 }}>
+                            {(() => {
+                              const q = entry.quoteData;
+                              const isNew = q.labour_subtotal !== undefined;
+                              if (isNew) {
+                                return (
+                                  <>
+                                    {[
+                                      { label: "Labour", val: q.labour_subtotal },
+                                      { label: "Materials", val: q.materials_subtotal },
+                                      { label: "Direct Costs", val: q.subtotal },
+                                      { label: `Site Prelims (${q.site_prelims_pct}%)`, val: q.site_prelims_cost },
+                                      { label: `Company Overhead (${q.overhead_pct}%)`, val: q.overhead_cost },
+                                      { label: `Net Profit (${q.profit_pct}%)`, val: q.profit_cost },
+                                    ].map((row, i) => (
+                                      <div key={i} style={{ display: "flex", justifyContent: "space-between",
+                                        padding: "3px 8px", fontSize: 12, color: C.muted }}>
+                                        <span>{row.label}</span>
+                                        <span style={{ fontFamily: "'DM Mono'" }}>{fmt(row.val)}</span>
+                                      </div>
+                                    ))}
+                                  </>
+                                );
+                              } else {
+                                return (
+                                  <>
+                                    {[
+                                      { label: "Subtotal", val: q.subtotal },
+                                      { label: `Prelims (${q.prelims_pct}%)`, val: q.prelims_cost },
+                                      { label: `FBS Margin (${q.margin_pct}%)`, val: q.margin_cost },
+                                    ].map((row, i) => (
+                                      <div key={i} style={{ display: "flex", justifyContent: "space-between",
+                                        padding: "3px 8px", fontSize: 12, color: C.muted }}>
+                                        <span>{row.label}</span>
+                                        <span style={{ fontFamily: "'DM Mono'" }}>{fmt(row.val)}</span>
+                                      </div>
+                                    ))}
+                                  </>
+                                );
+                              }
+                            })()}
+                            <div style={{ display: "flex", justifyContent: "space-between",
+                              padding: "8px", background: "#F59E0B18", borderRadius: 5,
+                              marginTop: 4, border: "1px solid #F59E0B33" }}>
+                              <span style={{ fontFamily: "'Bebas Neue'", fontSize: 15, color: C.amber }}>TOTAL (EX VAT)</span>
+                              <span style={{ fontFamily: "'Bebas Neue'", fontSize: 17, color: C.amber }}>{fmt(entry.quoteData.total)}</span>
+                            </div>
+                            {(entry.quoteData.cis_cost ?? 0) > 0 && (
+                              <div style={{ display: "flex", justifyContent: "space-between",
+                                padding: "6px 8px", marginTop: 6, fontSize: 11, color: C.muted, fontFamily: "'DM Mono'" }}>
+                                <span>CIS withheld from subbies ({entry.quoteData.cis_pct}%)</span>
+                                <span>-{fmt(entry.quoteData.cis_cost)}</span>
+                              </div>
+                            )}
+                            {entry.quoteData.ps_subtotal > 0 && (
+                              <div style={{ marginTop: 6, padding: "6px 8px", background: "#F59E0B0A",
+                                border: `1px solid ${C.amber}33`, borderRadius: 4, fontSize: 10,
+                                color: C.amber, fontFamily: "'DM Mono'" }}>
+                                ⚠ Includes {fmt(entry.quoteData.ps_subtotal)} provisional sums
+                              </div>
+                            )}
                           </div>
-                        )}
-                        {entry.quoteData.ps_subtotal > 0 && (
-                          <div style={{ marginTop: 6, padding: "6px 8px", background: "#F59E0B0A",
-                            border: `1px solid ${C.amber}33`, borderRadius: 4, fontSize: 10,
-                            color: C.amber, fontFamily: "'DM Mono'" }}>
-                            ⚠ Includes {fmt(entry.quoteData.ps_subtotal)} provisional sums
-                          </div>
-                        )}
-                      </div>
+                        </>
+                      )}
+
+                      {/* Slack panel */}
+                      {historySlackId === entry.id && (
+                        <SlackSendPanel
+                          text={buildHistoryText(entry)}
+                          channel={slackChannel} setChannel={setSlackChannel}
+                          recentChannels={recentSlackChannels}
+                          status={slackStatus}
+                          onSend={sendToSlack}
+                          onClose={() => setHistorySlackId(null)}
+                        />
+                      )}
+
+                      {/* Action buttons */}
                       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-                        <button onClick={() => loadHistoryEntry(entry)}
-                          style={{ background: C.amber, border: "none",
-                            borderRadius: 5, padding: "7px 16px", color: "#000",
-                            fontFamily: "'DM Mono'", fontSize: 11, cursor: "pointer",
-                            letterSpacing: "0.06em", textTransform: "uppercase" }}>
-                          Load into Editor
-                        </button>
-                        <button onClick={() => loadHistoryEntry(entry, true)}
-                          style={{ background: "transparent", border: `1px solid ${C.subtle}`,
-                            borderRadius: 5, padding: "7px 14px", color: C.muted,
-                            fontFamily: "'DM Mono'", fontSize: 11, cursor: "pointer",
-                            letterSpacing: "0.06em" }}>
-                          ✏ Refine
-                        </button>
+                        {entry.type !== "summary" && (
+                          <>
+                            <button onClick={() => loadHistoryEntry(entry)}
+                              style={{ background: C.amber, border: "none",
+                                borderRadius: 5, padding: "7px 16px", color: "#000",
+                                fontFamily: "'DM Mono'", fontSize: 11, cursor: "pointer",
+                                letterSpacing: "0.06em", textTransform: "uppercase" }}>
+                              Load into Editor
+                            </button>
+                            <button onClick={() => loadHistoryEntry(entry, true)}
+                              style={{ background: "transparent", border: `1px solid ${C.subtle}`,
+                                borderRadius: 5, padding: "7px 14px", color: C.muted,
+                                fontFamily: "'DM Mono'", fontSize: 11, cursor: "pointer",
+                                letterSpacing: "0.06em" }}>
+                              ✏ Refine
+                            </button>
+                          </>
+                        )}
                       </div>
                     </div>
                   )}
