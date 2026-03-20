@@ -1,14 +1,21 @@
 // MaterialsSourcing.jsx — Materials Cost Sourcing modal
 // Two-stage pipeline: Gemini 2.5 Pro identifies materials → Perplexity sources UK prices
+//
+// NEW in this version:
+//  - Project Store: after identify/source completes, analysis is auto-saved to Vercel KV
+//  - Load Previous: if a saved analysis exists for this jobRef, a banner offers to reload it
+//  - syncKey prop added (passed from FBSQuoteScoper) for per-user KV storage
+//  - Chunked identify is handled server-side (materials-identify.js now auto-chunks > 12 items)
+//  - chunks_processed shown in identified header for transparency
 
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useEffect } from "react";
 
 const C = {
   bg: "#0A0D14", card: "#0F1117", inner: "#161B27",
   border: "#1E2535", subtle: "#374151", muted: "#6B7280",
   text: "#E5E7EB", dim: "#9CA3AF", green: "#10B981",
   amber: "#F59E0B", red: "#EF4444", emerald: "#059669",
-  blue: "#3B82F6", purple: "#8B5CF6",
+  blue: "#3B82F6", purple: "#8B5CF6", teal: "#14B8A6",
 };
 
 const BUDGET_OPTIONS = [
@@ -19,6 +26,12 @@ const BUDGET_OPTIONS = [
 
 function fmtGBP(v) {
   return `£${Number(v || 0).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function fmtDate(iso) {
+  if (!iso) return "";
+  try { return new Date(iso).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }); }
+  catch { return iso; }
 }
 
 function Badge({ color, children }) {
@@ -54,7 +67,7 @@ function IdentifyCard({ material, index, onEdit }) {
 
   const inp = (field, placeholder) => (
     <input
-      value={local[field]}
+      value={local[field] || ""}
       placeholder={placeholder}
       onChange={e => setLocal(m => ({ ...m, [field]: e.target.value }))}
       style={{
@@ -119,7 +132,8 @@ function IdentifyCard({ material, index, onEdit }) {
               )}
               <p style={{ margin: 0, color: C.dim, fontSize: 11 }}>
                 Qty: <strong style={{ color: C.text }}>{local.quantity_gross} {local.unit}</strong>
-                {" · "}net {local.quantity_net} · waste ×{local.waste_factor}
+                {local.quantity_net ? ` · net ${local.quantity_net}` : ""}
+                {local.waste_factor ? ` · waste ×${local.waste_factor}` : ""}
               </p>
               {local.notes && (
                 <p style={{
@@ -230,6 +244,39 @@ function SourcedCard({ item }) {
   );
 }
 
+// ── Saved project banner ──────────────────────────────────────────────────────
+function SavedBanner({ project, onLoad, onDismiss }) {
+  return (
+    <div style={{
+      background: C.teal + "18", border: `1px solid ${C.teal}44`,
+      borderRadius: 8, padding: "12px 16px", marginBottom: 16,
+      display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12,
+    }}>
+      <div>
+        <p style={{ margin: "0 0 2px", fontSize: 12, fontWeight: 600, color: C.teal }}>
+          💾 Saved analysis found for {project.jobRef}
+        </p>
+        <p style={{ margin: 0, fontSize: 11, color: C.muted }}>
+          {project.materialCount} materials identified
+          {project.sourcedCount ? `, ${project.sourcedCount} sourced` : ""}
+          {project.imageCount ? ` · ${project.imageCount} images` : ""}
+          {" · "}saved {fmtDate(project.savedAt)}
+        </p>
+      </div>
+      <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+        <button onClick={onLoad} style={{
+          padding: "5px 14px", background: C.teal, color: "#fff",
+          border: "none", borderRadius: 5, cursor: "pointer", fontSize: 12, fontWeight: 600,
+        }}>Load</button>
+        <button onClick={onDismiss} style={{
+          padding: "5px 10px", background: "none", color: C.muted,
+          border: `1px solid ${C.border}`, borderRadius: 5, cursor: "pointer", fontSize: 12,
+        }}>Ignore</button>
+      </div>
+    </div>
+  );
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 export default function MaterialsSourcing({
   scopeItems = [],
@@ -239,6 +286,7 @@ export default function MaterialsSourcing({
   jobDescription = "",
   apiBase = "",
   secret = "",
+  syncKey = "",
   onClose,
   initialMaterials = null, // pre-loaded from pipeline — skips identify step
 }) {
@@ -248,11 +296,81 @@ export default function MaterialsSourcing({
   const [sourced, setSourced] = useState(null);
   const [errorMsg, setErrorMsg] = useState("");
   const [editedMaterials, setEditedMaterials] = useState(initialMaterials?.materials || []);
+  const [savedProject, setSavedProject] = useState(null);   // summary from KV index
+  const [savedBannerDismissed, setSavedBannerDismissed] = useState(false);
+  const [saveStatus, setSaveStatus] = useState("idle");     // idle | saving | saved | error
 
   const headers = {
     "Content-Type": "application/json",
     ...(secret ? { "x-fbs-secret": secret } : {}),
   };
+
+  // ── Check if a saved analysis exists for this jobRef ───────────────────────
+  useEffect(() => {
+    if (!syncKey || !jobRef || !apiBase) return;
+    fetch(`${apiBase}/api/project-store/list?syncKey=${encodeURIComponent(syncKey)}`, {
+      headers: secret ? { "x-fbs-secret": secret } : {},
+    })
+      .then(r => r.json())
+      .then(data => {
+        const match = (data.projects || []).find(p => p.jobRef === jobRef);
+        if (match) setSavedProject(match);
+      })
+      .catch(() => {}); // non-fatal — project store check is best-effort
+  }, [syncKey, jobRef, apiBase, secret]);
+
+  // ── Load a previously saved project from KV ────────────────────────────────
+  const loadSavedProject = useCallback(async () => {
+    if (!syncKey || !jobRef) return;
+    try {
+      const r = await fetch(`${apiBase}/api/project-store?syncKey=${encodeURIComponent(syncKey)}&jobRef=${encodeURIComponent(jobRef)}`, {
+        headers: secret ? { "x-fbs-secret": secret } : {},
+      });
+      if (!r.ok) throw new Error("Not found");
+      const { project } = await r.json();
+      if (project.identified) {
+        setIdentified(project.identified);
+        setEditedMaterials(project.identified.materials || []);
+        setStage("identified");
+      }
+      if (project.sourced) {
+        setSourced(project.sourced);
+        setStage("complete");
+      }
+      setSavedBannerDismissed(true);
+    } catch {
+      // silently ignore — user can proceed normally
+    }
+  }, [syncKey, jobRef, apiBase, secret]);
+
+  // ── Auto-save to project store ─────────────────────────────────────────────
+  const saveToStore = useCallback(async (identifiedResult, sourcedResult) => {
+    if (!syncKey || !jobRef || !apiBase) return;
+    setSaveStatus("saving");
+    try {
+      await fetch(`${apiBase}/api/project-store`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(secret ? { "x-fbs-secret": secret } : {}),
+        },
+        body: JSON.stringify({
+          syncKey,
+          jobRef,
+          jobDescription,
+          description,
+          scopeItems,
+          identified: identifiedResult,
+          sourced: sourcedResult || null,
+          imageCount: images.length,
+        }),
+      });
+      setSaveStatus("saved");
+      console.log(`Project ${jobRef} auto-saved to store.`);
+    } catch {
+      setSaveStatus("error");
+    }
+  }, [syncKey, jobRef, apiBase, secret, jobDescription, description, scopeItems, images.length]);
 
   const runIdentify = useCallback(async () => {
     setStage("identifying");
@@ -277,11 +395,13 @@ export default function MaterialsSourcing({
       setIdentified(result);
       setEditedMaterials(result.materials || []);
       setStage("identified");
+      // Auto-save identify result (sourced will be null at this point)
+      await saveToStore(result, null);
     } catch (err) {
       setErrorMsg(err.message);
       setStage("error");
     }
-  }, [apiBase, images, scopeItems, description, jobDescription, jobRef, secret]);
+  }, [apiBase, images, scopeItems, description, jobDescription, jobRef, secret, saveToStore]);
 
   const runSource = useCallback(async () => {
     setStage("sourcing");
@@ -299,11 +419,13 @@ export default function MaterialsSourcing({
       const result = await resp.json();
       setSourced(result);
       setStage("complete");
+      // Auto-save complete results
+      await saveToStore(identified, result);
     } catch (err) {
       setErrorMsg(err.message);
       setStage("error");
     }
-  }, [apiBase, editedMaterials, budget, secret]);
+  }, [apiBase, editedMaterials, budget, secret, saveToStore, identified]);
 
   function handleEditMaterial(index, updated) {
     setEditedMaterials(prev => prev.map((m, i) => (i === index ? updated : m)));
@@ -344,6 +466,20 @@ export default function MaterialsSourcing({
     }}>{label}</button>
   );
 
+  // Save status chip shown in header when KV store is available
+  const SaveChip = () => {
+    if (!syncKey || saveStatus === "idle") return null;
+    const chipMap = {
+      saving: { color: C.muted, label: "Saving…" },
+      saved:  { color: C.teal,  label: "✓ Saved to project store" },
+      error:  { color: C.amber, label: "⚠ Save failed" },
+    };
+    const chip = chipMap[saveStatus];
+    return (
+      <span style={{ fontSize: 11, color: chip.color, marginLeft: 8 }}>{chip.label}</span>
+    );
+  };
+
   return (
     <div style={{
       position: "fixed", inset: 0, background: "rgba(0,0,0,0.65)",
@@ -363,9 +499,12 @@ export default function MaterialsSourcing({
           background: C.inner,
         }}>
           <div>
-            <h2 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: C.text }}>
-              Material Cost Sourcing
-            </h2>
+            <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <h2 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: C.text }}>
+                Material Cost Sourcing
+              </h2>
+              <SaveChip />
+            </div>
             <p style={{ margin: "2px 0 0", fontSize: 11, color: C.muted }}>
               {jobRef ? `Job: ${jobRef} · ` : ""}{scopeItems.length} scope items · Live UK supplier pricing
             </p>
@@ -378,15 +517,30 @@ export default function MaterialsSourcing({
 
         <div style={{ padding: 20 }}>
 
+          {/* Saved project banner (shown on idle screen when a previous save exists) */}
+          {savedProject && !savedBannerDismissed && stage === "idle" && (
+            <SavedBanner
+              project={savedProject}
+              onLoad={loadSavedProject}
+              onDismiss={() => setSavedBannerDismissed(true)}
+            />
+          )}
+
           {/* ── IDLE ──────────────────────────────────────────────────── */}
           {stage === "idle" && (
             <div style={{ textAlign: "center", padding: "24px 0" }}>
               <div style={{ fontSize: 40, marginBottom: 12 }}>🏗</div>
               <h3 style={{ margin: "0 0 6px", color: C.text, fontSize: 15 }}>Source Material Costs</h3>
               <p style={{ margin: "0 0 24px", color: C.muted, fontSize: 13, maxWidth: 420, marginLeft: "auto", marginRight: "auto" }}>
-                Analyse your scope items and site photos to identify every material required,
-                then search UK suppliers for live prices and product links.
+                Analyse your scope items and site photos to identify every material required
+                (including first-fix items), then search UK suppliers for live prices and product links.
               </p>
+
+              {images.length > 0 && (
+                <p style={{ color: C.teal, fontSize: 12, marginBottom: 16 }}>
+                  📸 {images.length} image{images.length > 1 ? "s" : ""} will be analysed for material specs and site context
+                </p>
+              )}
 
               {/* Budget selector */}
               <p style={{ color: C.dim, fontSize: 12, marginBottom: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em" }}>
@@ -409,7 +563,7 @@ export default function MaterialsSourcing({
 
               {btn("Identify Materials →", runIdentify, C.blue)}
               <p style={{ color: C.muted, fontSize: 11, marginTop: 10 }}>
-                Step 1 of 2 · Gemini 2.5 Pro analyses scope + photos
+                Step 1 of 2 · Gemini 2.5 Pro analyses scope + photos · large jobs split into chunks automatically
               </p>
             </div>
           )}
@@ -424,7 +578,10 @@ export default function MaterialsSourcing({
             <div>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
                 <h3 style={{ margin: 0, fontSize: 14, color: C.text }}>
-                  {editedMaterials.length} materials identified — review & edit
+                  {editedMaterials.length} materials identified
+                  {identified.chunks_processed > 1
+                    ? <span style={{ fontSize: 11, color: C.teal, marginLeft: 8 }}>({identified.chunks_processed} chunks)</span>
+                    : null}
                 </h3>
                 <span style={{ fontSize: 11, color: C.muted }}>Edit any item before sourcing</span>
               </div>
@@ -461,7 +618,7 @@ export default function MaterialsSourcing({
 
           {/* ── SOURCING ──────────────────────────────────────────────── */}
           {stage === "sourcing" && (
-            <Spinner label={`Perplexity searching UK suppliers for ${editedMaterials.length} materials… (30–60 sec)`} />
+            <Spinner label={`Perplexity searching UK suppliers for ${editedMaterials.length} materials… (30–90 sec)`} />
           )}
 
           {/* ── COMPLETE ──────────────────────────────────────────────── */}
@@ -495,10 +652,17 @@ export default function MaterialsSourcing({
                 ))}
               </div>
 
-              <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <span style={{ fontSize: 11, color: C.muted }}>
-                  Searched: {new Date(sourced.search_timestamp).toLocaleString("en-GB")}
-                </span>
+              <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+                <div>
+                  <span style={{ fontSize: 11, color: C.muted }}>
+                    Searched: {new Date(sourced.search_timestamp).toLocaleString("en-GB")}
+                  </span>
+                  {saveStatus === "saved" && (
+                    <span style={{ fontSize: 11, color: C.teal, marginLeft: 12 }}>
+                      💾 Results saved — reload from project store next visit
+                    </span>
+                  )}
+                </div>
                 <button onClick={() => setStage("identified")} style={{
                   background: "none", border: "none", color: C.blue,
                   cursor: "pointer", fontSize: 12,
