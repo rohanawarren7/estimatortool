@@ -19,19 +19,36 @@ module.exports = async function handler(req, res) {
 
   try {
     const audioBuffer = Buffer.from(audio, "base64");
-    const audioBlob = new Blob([audioBuffer], { type: "audio/wav" });
 
-    const form = new FormData();
-    form.append("file", audioBlob, "audio.wav");
-    form.append("model", "whisper-large-v3-turbo");
-    form.append("response_format", "text");
+    // Build multipart/form-data manually using Buffer — avoids the experimental
+    // buffer.File warning triggered by new Blob() + FormData in Node 20.
+    const boundary = "----WhisperBoundary" + Math.random().toString(36).slice(2);
+    const CRLF = "\r\n";
+    const body = Buffer.concat([
+      Buffer.from(
+        `--${boundary}${CRLF}` +
+        `Content-Disposition: form-data; name="file"; filename="audio.wav"${CRLF}` +
+        `Content-Type: audio/wav${CRLF}${CRLF}`
+      ),
+      audioBuffer,
+      Buffer.from(
+        `${CRLF}--${boundary}${CRLF}` +
+        `Content-Disposition: form-data; name="model"${CRLF}${CRLF}` +
+        `whisper-large-v3-turbo${CRLF}` +
+        `--${boundary}${CRLF}` +
+        `Content-Disposition: form-data; name="response_format"${CRLF}${CRLF}` +
+        `text${CRLF}` +
+        `--${boundary}--${CRLF}`
+      ),
+    ]);
 
     const response = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${process.env.GROQ_API_KEY}`
+        "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
+        "Content-Type": `multipart/form-data; boundary=${boundary}`,
       },
-      body: form
+      body,
     });
 
     if (!response.ok) {
