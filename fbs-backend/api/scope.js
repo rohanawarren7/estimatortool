@@ -245,14 +245,62 @@ module.exports = async function handler(req, res) {
 
   // Shared parse + normalise logic used by both streaming and non-streaming paths
   function parseAndNormalise(raw, finishReason) {
-    console.log("Kimi raw response:", raw.slice(0, 500));
+    console.log("Kimi raw response:", raw.slice(0, 300));
     console.log("Finish reason:", finishReason);
-    const clean = raw.replace(/```json|```/g, "").trim();
+
+    // ── Strip Kimi K2.5 thinking blocks ──────────────────────────────────────
+    // Kimi K2.5 is a reasoning model. It emits <think>…</think> before the JSON.
+    // If max_tokens was too low, the block may be truncated (no closing tag) —
+    // handle both cases so we always extract the JSON portion.
+    let stripped = raw
+      .replace(/<think>[\s\S]*?<\/think>/gi, "")   // complete thinking block
+      .replace(/<think>[\s\S]*/gi, "")               // truncated thinking block
+      .trim();
+
+    if (!stripped && finishReason === "length") {
+      throw new Error(
+        "Kimi hit token limit inside its reasoning block — response was entirely " +
+        "<think> tokens with no JSON output. This should not happen with max_tokens=16000; " +
+        "check prompt length or model availability."
+      );
+    }
+
+    const clean = stripped.replace(/```json|```/g, "").trim();
     const start = clean.indexOf("{");
-    const end = clean.lastIndexOf("}");
+    const end   = clean.lastIndexOf("}");
+
     if (start === -1 || end === -1) {
+      // ── JSON repair: truncation mid-object (finish_reason=length) ──────────
+      // Find the last fully-closed item object and close the structure around it.
+      if (finishReason === "length" && start !== -1) {
+        console.warn("Truncated JSON detected — attempting repair");
+        const partial = clean.slice(start);
+        // Walk backwards to find last complete '}' that closes an items entry
+        let depth = 0;
+        let lastGoodClose = -1;
+        for (let i = 0; i < partial.length; i++) {
+          if (partial[i] === "{") depth++;
+          if (partial[i] === "}") { depth--; if (depth === 0) lastGoodClose = i; }
+        }
+        if (lastGoodClose > 0) {
+          // Find the opening of the outermost { (depth was 0 initially, so first { = job object)
+          // Strategy: close the items array and the root object
+          const repaired = partial.slice(0, lastGoodClose + 1) +
+            '], "site_queries": ["Note: scope truncated — re-run for full output"] }';
+          try {
+            const fixedJson = repaired.replace(/"items":\s*\[[^\[]*$/, "") + "}";
+            const parsed2 = JSON.parse("{" + partial.slice(1, lastGoodClose + 1) + "}");
+            console.warn("Repair produced partial parse:", JSON.stringify(parsed2).slice(0, 100));
+          } catch {}
+        }
+        throw new Error(
+          `JSON truncated mid-response (finish_reason=length). Increase max_tokens or reduce prompt. ` +
+          `Partial raw: ${clean.slice(start, start + 200)}`
+        );
+      }
       throw new Error(`No JSON object found. finish_reason=${finishReason} raw=${raw.slice(0, 200)}`);
     }
+
     const parsed = JSON.parse(clean.slice(start, end + 1));
 
     if (parsed.items) {
@@ -285,7 +333,7 @@ module.exports = async function handler(req, res) {
         headers: openRouterHeaders,
         body: JSON.stringify({
           model: MODEL,
-          max_tokens: 6000,
+          max_tokens: 16000,
           temperature: 0.1,
           stream: true,
           messages: [{ role: "user", content: promptText }]
@@ -343,7 +391,7 @@ module.exports = async function handler(req, res) {
       headers: openRouterHeaders,
       body: JSON.stringify({
         model: MODEL,
-        max_tokens: 6000,
+        max_tokens: 16000,
         temperature: 0.1,
         messages: [{ role: "user", content: promptText }]
       })
