@@ -14,7 +14,8 @@ app.use(express.json({ limit: "20mb" }));
 
 app.all("/api/describe",           require("./api/describe"));
 app.all("/api/scope",              require("./api/scope"));
-app.all("/api/transcribe",         require("./api/transcribe"));
+// /api/transcribe is handled by materials-voice (shared Whisper transcription logic)
+app.all("/api/transcribe",         require("./api/materials-voice"));
 app.all("/api/summarise",          require("./api/summarise"));
 app.all("/api/slack",              require("./api/slack"));
 app.all("/api/history",            require("./api/history"));
@@ -29,8 +30,6 @@ app.all("/api/project-store/list", require("./api/project-store"));
 // Slack slash commands use form-encoded bodies (must come before global json middleware applies)
 app.use("/api/slack/command", express.urlencoded({ extended: false }));
 app.post("/api/slack/command", require("./api/slack-command"));
-
-app.all("/api",                    require("./api/index"));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`FBS API running on port ${PORT}`));
