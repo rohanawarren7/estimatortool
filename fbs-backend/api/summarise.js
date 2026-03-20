@@ -1,4 +1,5 @@
-// api/summarise.js — Generate a prose scope of works from a WAV transcript (+ optional job brief)
+// api/summarise.js — Generate a prose scope of works from site evidence (transcript and/or visual description)
+// Accepts: transcript (WAV/audio), description (visual/Gemini), or both — plus optional job brief.
 // Returns a formatted plain-text document suitable for sharing directly with clients or colleagues.
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
@@ -6,10 +7,10 @@ const MODEL = "moonshotai/kimi-k2.5";
 
 const SUMMARISE_PROMPT = `You are a professional site manager for a London-based building contractor called Fallow Building Services (FBS).
 
-You have been given an audio transcript recorded on site and an optional job brief. Your task is to produce a clear, professional scope of works document from the content of the transcript.
+You have been given site evidence (an audio transcript, a visual site inspection report, or both) and an optional job brief. Your task is to produce a clear, professional scope of works document.
 
 RULES:
-1. Extract only what is mentioned or clearly implied in the transcript — do not invent works.
+1. Extract only what is mentioned or clearly implied in the evidence — do not invent works.
 2. Group works by trade or room/area, whichever is clearer given the content.
 3. Use concise bullet points under each heading.
 4. After the scope, include a short "Notes" section covering anything uncertain or that needs further clarification on site.
@@ -45,12 +46,15 @@ module.exports = async function handler(req, res) {
     return res.status(401).json({ error: "Unauthorised" });
   }
 
-  const { transcript, jobDescription } = req.body;
-  if (!transcript) return res.status(400).json({ error: "transcript is required" });
+  const { transcript, description, jobDescription } = req.body;
+  if (!transcript && !description) {
+    return res.status(400).json({ error: "At least one of transcript or description is required" });
+  }
 
   const contextParts = [];
   if (jobDescription?.trim()) contextParts.push(`JOB BRIEF:\n"${jobDescription.trim()}"`);
-  contextParts.push(`SITE RECORDING TRANSCRIPT:\n"${transcript}"`);
+  if (description?.trim())    contextParts.push(`VISUAL SITE INSPECTION REPORT (from photos/video frames):\n${description.trim()}`);
+  if (transcript?.trim())     contextParts.push(`AUDIO TRANSCRIPT FROM SITE RECORDING:\n"${transcript.trim()}"`);
 
   const promptText = `${contextParts.join("\n\n")}\n\n${SUMMARISE_PROMPT}`;
 

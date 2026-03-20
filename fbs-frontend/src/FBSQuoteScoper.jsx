@@ -1012,35 +1012,62 @@ export default function FBSQuoteScoper() {
   };
 
   const runSummaryPipeline = async () => {
-    if (audioClips.length === 0) { setError("Upload a WAV or video file with audio to use Scope Summary mode."); return; }
+    if (images.length === 0 && audioClips.length === 0) {
+      setError("Upload at least one photo, video, or audio file to generate a scope.");
+      return;
+    }
     setError(""); setErrorStage(""); setStreamingText("");
     setScopeData(null); setQuoteData(null); setSummaryData(null); setTranscriptData(null); setDescriptionData(null);
 
     try {
       setTab("quote");
 
-      // Stage 1 — Transcribe
-      setStage("transcribing");
       let transcript = null;
-      try {
-        const result = await callBackend("/api/transcribe", { audio: audioClips[0].b64 });
-        transcript = result.transcript || null;
-        setTranscriptData(transcript);
-      } catch (e) {
-        setError("Transcription failed: " + e.message);
-        setStage("error");
-        return;
-      }
-      if (!transcript) {
-        setError("No speech detected in the audio.");
-        setStage("error");
-        return;
+      let description = null;
+
+      // Stage 1a — Transcribe audio (if audio present, non-fatal)
+      if (audioClips.length > 0) {
+        setStage("transcribing");
+        try {
+          const result = await callBackend("/api/transcribe", { audio: audioClips[0].b64 });
+          transcript = result.transcript || null;
+          setTranscriptData(transcript);
+        } catch (e) {
+          // Non-fatal if images are also present; fatal if audio-only
+          if (images.length === 0) {
+            setError("Transcription failed: " + e.message);
+            setStage("error");
+            return;
+          }
+        }
+        if (!transcript && images.length === 0) {
+          setError("No speech detected in the audio.");
+          setStage("error");
+          return;
+        }
       }
 
-      // Stage 2 — Summarise
+      // Stage 1b — Describe images (if images present)
+      if (images.length > 0) {
+        setStage("describing");
+        setStreamingText("");
+        let descResult;
+        await callBackendStream(
+          "/api/describe",
+          { images, ...(jobDescription.trim() && { jobDescription: jobDescription.trim() }) },
+          token  => setStreamingText(prev => prev + token),
+          result => { descResult = result; }
+        );
+        if (!descResult) throw new Error("No result from Gemini");
+        description = descResult.description;
+        setDescriptionData(description);
+      }
+
+      // Stage 2 — Summarise (using any combination of transcript + description)
       setStage("summarising");
       const result = await callBackend("/api/summarise", {
-        transcript,
+        ...(transcript   && { transcript }),
+        ...(description  && { description }),
         ...(jobDescription.trim() && { jobDescription: jobDescription.trim() }),
       });
       setSummaryData(result.summary);
@@ -1844,22 +1871,39 @@ export default function FBSQuoteScoper() {
           {/* ── TAB: QUOTE ─────────────────────────────────────────────────── */}
           {tab === "quote" && (
             <div style={{ animation: "slideIn 0.2s ease" }}>
-              {stage === "transcribing" && (
-                <div style={{ padding: "40px 0", textAlign: "center" }}>
-                  <Spinner label={`Stage 1/${pipelineMode === "summary" ? 2 : totalStages} · Transcribing audio with Whisper…`} />
-                </div>
-              )}
-              {stage === "summarising" && (
-                <div style={{ padding: "40px 0", textAlign: "center" }}>
-                  <Spinner label="Stage 2/2 · Kimi K2.5 generating scope summary…" />
-                </div>
-              )}
+              {stage === "transcribing" && (() => {
+                const tot = pipelineMode === "summary"
+                  ? (images.length > 0 ? 3 : 2)   // audio+images=3, audio-only=2
+                  : totalStages;
+                return (
+                  <div style={{ padding: "40px 0", textAlign: "center" }}>
+                    <Spinner label={`Stage 1/${tot} · Transcribing audio with Whisper…`} />
+                  </div>
+                );
+              })()}
+              {stage === "summarising" && (() => {
+                const tot = pipelineMode === "summary"
+                  ? (hasAudio && images.length > 0 ? 3 : 2)
+                  : 2;
+                const stageNum = pipelineMode === "summary"
+                  ? (hasAudio && images.length > 0 ? 3 : hasAudio ? 2 : 2)
+                  : 2;
+                return (
+                  <div style={{ padding: "40px 0", textAlign: "center" }}>
+                    <Spinner label={`Stage ${stageNum}/${tot} · Kimi K2.5 generating scope summary…`} />
+                  </div>
+                );
+              })()}
               {stage === "describing" && (
                 <div style={{ padding: "40px 0", textAlign: "center" }}>
                   <Spinner label={
-                    describeSegProgress
-                      ? `Stage ${hasAudio ? "2" : "1"}/${totalStages} · Gemini analysing segment ${describeSegProgress.cur}/${describeSegProgress.total}…`
-                      : `Stage ${hasAudio ? "2" : "1"}/${totalStages} · Gemini 2.0 Flash analysing all frames…`
+                    pipelineMode === "summary"
+                      ? (describeSegProgress
+                          ? `Stage ${hasAudio ? "2" : "1"}/${hasAudio ? 3 : 2} · Gemini analysing segment ${describeSegProgress.cur}/${describeSegProgress.total}…`
+                          : `Stage ${hasAudio ? "2" : "1"}/${hasAudio ? 3 : 2} · Gemini 2.0 Flash analysing frames…`)
+                      : (describeSegProgress
+                          ? `Stage ${hasAudio ? "2" : "1"}/${totalStages} · Gemini analysing segment ${describeSegProgress.cur}/${describeSegProgress.total}…`
+                          : `Stage ${hasAudio ? "2" : "1"}/${totalStages} · Gemini 2.0 Flash analysing all frames…`)
                   } />
                 </div>
               )}

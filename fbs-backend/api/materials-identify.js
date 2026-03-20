@@ -157,14 +157,26 @@ module.exports = async function handler(req, res) {
     const raw = data.choices?.[0]?.message?.content || "";
     const finishReason = data.choices?.[0]?.finish_reason;
     console.log("Materials identify raw length:", raw.length, "chars, finish:", finishReason);
+    console.log("Materials identify raw (first 400):", raw.slice(0, 400));
 
-    const clean = raw.replace(/```json|```/g, "").trim();
-    const start = clean.indexOf("{");
-    const end = clean.lastIndexOf("}");
+    // Strip thinking blocks (Gemini 2.5 Pro emits <thinking>...</thinking> preamble)
+    const stripped = raw
+      .replace(/<thinking>[\s\S]*?<\/thinking>/gi, "")
+      .replace(/```json|```/g, "")
+      .trim();
+
+    const start = stripped.indexOf("{");
+    const end = stripped.lastIndexOf("}");
     if (start === -1 || end === -1) {
-      throw new Error(`No JSON object found in response. finish_reason=${finishReason}`);
+      throw new Error(`No JSON object found. finish_reason=${finishReason} raw_start=${raw.slice(0, 200)}`);
     }
-    const parsed = JSON.parse(clean.slice(start, end + 1));
+    let parsed;
+    try {
+      parsed = JSON.parse(stripped.slice(start, end + 1));
+    } catch (parseErr) {
+      console.error("JSON parse failed. Extracted slice:", stripped.slice(start, Math.min(start + 500, end + 1)));
+      throw new Error(`JSON parse failed: ${parseErr.message}. finish_reason=${finishReason}`);
+    }
 
     if (parsed.materials) {
       parsed.materials = parsed.materials.map((mat, idx) => ({

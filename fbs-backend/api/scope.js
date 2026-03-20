@@ -365,3 +365,6 @@ module.exports = async function handler(req, res) {
     return res.status(500).json({ error: err.message });
   }
 };
+
+// Export prompt text for use in other handlers (e.g. slack-command.js)
+module.exports.SCOPE_PROMPT_TEXT = SCOPE_PROMPT;

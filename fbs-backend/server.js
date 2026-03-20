@@ -20,6 +20,11 @@ app.all("/api/slack",      require("./api/slack"));
 app.all("/api/history",             require("./api/history"));
 app.all("/api/materials-identify",  require("./api/materials-identify"));
 app.all("/api/materials-source",    require("./api/materials-source"));
+
+// Slack slash commands use form-encoded bodies (must come before global json middleware applies)
+app.use("/api/slack/command", express.urlencoded({ extended: false }));
+app.post("/api/slack/command", require("./api/slack-command"));
+
 app.all("/api",                     require("./api/index"));
 
 const PORT = process.env.PORT || 3000;
