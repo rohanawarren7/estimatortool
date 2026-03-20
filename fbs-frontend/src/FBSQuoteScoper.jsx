@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import MaterialsSourcing from "./components/MaterialsSourcing";
+import MaterialsVoice from "./components/MaterialsVoice";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  CONFIGURATION — update VERCEL_BASE_URL after deployment
@@ -163,13 +164,12 @@ function priceScope(items, rates, complexity, sitePrelimsPct, overheadPct, profi
     .filter(l => l.confidence === "low")
     .reduce((s, l) => s + l.cost, 0);
 
-  const site_prelims_cost = Math.round(subtotal * sitePrelimsPct / 100);
-  const overhead_base     = subtotal + site_prelims_cost;
-  const overhead_cost     = Math.round(overhead_base * overheadPct / 100);
-  const profit_base       = overhead_base + overhead_cost;
-  const profit_cost       = Math.round(profit_base * profitPct / 100);
+  // Markups removed — profit is factored into labour rates directly
+  const site_prelims_cost = 0;
+  const overhead_cost     = 0;
+  const profit_cost       = 0;
   const cis_cost          = Math.round(labour_subtotal * cisPct / 100);
-  const total             = subtotal + site_prelims_cost + overhead_cost + profit_cost;
+  const total             = subtotal; // Direct Labour + Direct Materials only
 
   return {
     line_items,
@@ -695,6 +695,7 @@ export default function FBSQuoteScoper() {
   const [streamingText, setStreamingText]         = useState("");   // live token stream during AI stages
   const [errorStage, setErrorStage]               = useState("");   // which stage failed
   const [showMaterialsSourcing, setShowMaterialsSourcing] = useState(false);
+  const [showMaterialsVoice, setShowMaterialsVoice]       = useState(false);
   const [materialsInitial, setMaterialsInitial]           = useState(null); // pre-loaded from pipeline
   const fileRef         = useRef();
   const streamingBoxRef = useRef();
@@ -1314,16 +1315,8 @@ export default function FBSQuoteScoper() {
         ...(isNew ? [
           `Labour (direct costs):                                                       ${fmt(q.labour_subtotal)}`,
           `Materials (direct costs):                                                    ${fmt(q.materials_subtotal)}`,
-          `Direct Costs:                                                                ${fmt(q.subtotal)}`,
-          `Site Prelims / Supervision (${q.site_prelims_pct}%):                                          ${fmt(q.site_prelims_cost)}`,
-          `Company Overhead (${q.overhead_pct}%):                                                        ${fmt(q.overhead_cost)}`,
-          `${"─".repeat(90)}`,
-          `Total Cost:                                                                  ${fmt(q.subtotal + q.site_prelims_cost + q.overhead_cost)}`,
-          `Net Profit (${q.profit_pct}%):                                                              ${fmt(q.profit_cost)}`,
         ] : [
           `Subtotal (direct costs):                                                     ${fmt(q.subtotal)}`,
-          `Prelims / Supervision (${q.prelims_pct}%):                                                ${fmt(q.prelims_cost)}`,
-          `FBS Margin (${q.margin_pct}%):                                                             ${fmt(q.margin_cost)}`,
         ]),
         `${"═".repeat(90)}`,
         `TOTAL (ex VAT):                                                                ${fmt(q.total)}`,
@@ -1341,16 +1334,8 @@ export default function FBSQuoteScoper() {
         ...(isNew ? [
           `Labour (direct costs):        ${fmt(q.labour_subtotal)}`,
           `Materials (direct costs):     ${fmt(q.materials_subtotal)}`,
-          `Direct Costs:                 ${fmt(q.subtotal)}`,
-          `Site Prelims (${q.site_prelims_pct}%):            ${fmt(q.site_prelims_cost)}`,
-          `Company Overhead (${q.overhead_pct}%):            ${fmt(q.overhead_cost)}`,
-          `${"─".repeat(48)}`,
-          `Total Cost:                   ${fmt(q.subtotal + q.site_prelims_cost + q.overhead_cost)}`,
-          `Net Profit (${q.profit_pct}%):               ${fmt(q.profit_cost)}`,
         ] : [
           `Subtotal (direct costs):      ${fmt(q.subtotal)}`,
-          `Prelims (${q.prelims_pct}%):               ${fmt(q.prelims_cost)}`,
-          `FBS Margin (${q.margin_pct}%):             ${fmt(q.margin_cost)}`,
         ]),
         `${"─".repeat(48)}`,
         `TOTAL (EX VAT):               ${fmt(q.total)}`,
@@ -1426,14 +1411,9 @@ export default function FBSQuoteScoper() {
       ...(isNew
         ? [
             `Direct Costs:          ${fmt(q.subtotal)}`,
-            `Site Prelims (${q.site_prelims_pct}%):    ${fmt(q.site_prelims_cost)}`,
-            `Company Overhead (${q.overhead_pct}%): ${fmt(q.overhead_cost)}`,
-            `Net Profit (${q.profit_pct}%):       ${fmt(q.profit_cost)}`,
           ]
         : [
             `Subtotal:   ${fmt(q.subtotal)}`,
-            `Prelims (${q.prelims_pct}%): ${fmt(q.prelims_cost)}`,
-            `Margin (${q.margin_pct}%):  ${fmt(q.margin_cost)}`,
           ]),
       `${"═".repeat(60)}`,
       `TOTAL (ex VAT): ${fmt(q.total)}`,
@@ -1786,12 +1766,9 @@ export default function FBSQuoteScoper() {
                 </div>
               </div>
 
-              {/* Financial model — 3 fields + CIS */}
+              {/* Financial model — CIS only (prelims/overhead/profit hidden — profit built into labour rates) */}
               <div style={{ display: "flex", gap: 16, marginBottom: 24, flexWrap: "wrap" }}>
                 {[
-                  { label: "SITE PRELIMS %",      val: sitePrelims, set: setSitePrelims, color: C.text,    hint: "Skip hire, PPE, site visits",               max: 30 },
-                  { label: "COMPANY OVERHEAD %",   val: overhead,    set: setOverhead,    color: C.text,    hint: "Insurance, vehicles, office",               max: 40 },
-                  { label: "NET PROFIT %",          val: profit,      set: setProfit,      color: C.amber,   hint: "Genuine profit margin",                     max: 60 },
                   { label: "CIS DEDUCTION %",       val: cisDeduction,set: setCisDeduction,color: "#9CA3AF", hint: "Informational — withheld from subbies",     max: 30 },
                 ].map(({ label, val, set, color, hint, max }) => (
                   <div key={label} style={{ flex: "1 1 120px", minWidth: 120 }}>
@@ -1806,11 +1783,6 @@ export default function FBSQuoteScoper() {
                   </div>
                 ))}
               </div>
-              {(sitePrelims + overhead + profit) > 60 && (
-                <div style={{ color: "#F59E0B", fontSize: 11, fontFamily: "'DM Mono'", marginBottom: 16 }}>
-                  ⚠ Total uplift ({(sitePrelims + overhead + profit).toFixed(0)}%) is unusually high — check figures
-                </div>
-              )}
 
               {/* Rate card */}
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
@@ -2219,6 +2191,12 @@ export default function FBSQuoteScoper() {
                           SOURCE MATERIALS
                         </button>
                       )}
+                      <button onClick={() => setShowMaterialsVoice(true)}
+                        style={{ background: "#4C1D95", border: "none",
+                          borderRadius: 5, padding: "5px 14px", color: "#C4B5FD", fontSize: 11,
+                          fontFamily: "'DM Mono'", cursor: "pointer", letterSpacing: "0.06em" }}>
+                        🎙 VOICE MATERIALS
+                      </button>
                     </div>
                   </div>
 
@@ -2294,7 +2272,6 @@ export default function FBSQuoteScoper() {
                       const q = quoteData;
                       const isNew = q.labour_subtotal !== undefined;
                       if (isNew) {
-                        const totalCost = q.subtotal + q.site_prelims_cost + q.overhead_cost;
                         return (
                           <>
                             <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 10px", fontSize: 12, color: C.muted }}>
@@ -2304,26 +2281,6 @@ export default function FBSQuoteScoper() {
                             <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 10px", fontSize: 12, color: C.muted }}>
                               <span>Materials (direct costs)</span>
                               <span style={{ fontFamily: "'DM Mono'" }}>{fmt(q.materials_subtotal)}</span>
-                            </div>
-                            <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 10px 2px", fontSize: 13, borderTop: `1px solid ${C.border}44`, marginTop: 2 }}>
-                              <span>Direct Costs{q.ps_subtotal > 0 ? <span style={{ fontSize: 11, color: C.amber, fontFamily: "'DM Mono'", marginLeft: 8 }}>incl. {fmt(q.ps_subtotal)} PS</span> : ""}</span>
-                              <span style={{ fontFamily: "'DM Mono'" }}>{fmt(q.subtotal)}</span>
-                            </div>
-                            <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 10px", fontSize: 12, color: C.muted }}>
-                              <span>Site Prelims ({q.site_prelims_pct}%)</span>
-                              <span style={{ fontFamily: "'DM Mono'" }}>{fmt(q.site_prelims_cost)}</span>
-                            </div>
-                            <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 10px", fontSize: 12, color: C.muted }}>
-                              <span>Company Overhead ({q.overhead_pct}%)</span>
-                              <span style={{ fontFamily: "'DM Mono'" }}>{fmt(q.overhead_cost)}</span>
-                            </div>
-                            <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 10px 2px", fontSize: 13, borderTop: `1px solid ${C.border}44`, marginTop: 2 }}>
-                              <span>Total Cost</span>
-                              <span style={{ fontFamily: "'DM Mono'" }}>{fmt(totalCost)}</span>
-                            </div>
-                            <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 10px", fontSize: 12, color: C.muted }}>
-                              <span>Net Profit ({q.profit_pct}%)</span>
-                              <span style={{ fontFamily: "'DM Mono'" }}>{fmt(q.profit_cost)}</span>
                             </div>
                           </>
                         );
@@ -2586,10 +2543,6 @@ export default function FBSQuoteScoper() {
                                     {[
                                       { label: "Labour", val: q.labour_subtotal },
                                       { label: "Materials", val: q.materials_subtotal },
-                                      { label: "Direct Costs", val: q.subtotal },
-                                      { label: `Site Prelims (${q.site_prelims_pct}%)`, val: q.site_prelims_cost },
-                                      { label: `Company Overhead (${q.overhead_pct}%)`, val: q.overhead_cost },
-                                      { label: `Net Profit (${q.profit_pct}%)`, val: q.profit_cost },
                                     ].map((row, i) => (
                                       <div key={i} style={{ display: "flex", justifyContent: "space-between",
                                         padding: "3px 8px", fontSize: 12, color: C.muted }}>
@@ -2720,6 +2673,13 @@ export default function FBSQuoteScoper() {
         secret={FBS_SECRET || ""}
         initialMaterials={materialsInitial}
         onClose={() => { setShowMaterialsSourcing(false); setMaterialsInitial(null); }}
+      />
+    )}
+    {showMaterialsVoice && (
+      <MaterialsVoice
+        apiBase={VERCEL_BASE_URL || ""}
+        secret={FBS_SECRET || ""}
+        onClose={() => setShowMaterialsVoice(false)}
       />
     )}
     </>
