@@ -425,11 +425,12 @@ function StatusBadge({ stage }) {
     transcribing: { label: "Transcribing audio…",  color: "#D97706" },
     describing:   { label: "Analysing frames…",    color: "#D97706" },
     scoping:      { label: "Building takeoff…",    color: "#D97706" },
-    done:         { label: "Quote ready",           color: "#059669" },
+    summarising:  { label: "Summarising scope…",   color: "#D97706" },
+    done:         { label: "Ready",                color: "#059669" },
     error:        { label: "Error",                color: "#DC2626" },
   };
   const s = map[stage] || map.idle;
-  const busy = stage === "transcribing" || stage === "describing" || stage === "scoping";
+  const busy = stage === "transcribing" || stage === "describing" || stage === "scoping" || stage === "summarising";
   return (
     <span style={{
       fontSize: 11, fontFamily: "'DM Mono', monospace", letterSpacing: "0.1em",
@@ -493,8 +494,10 @@ export default function FBSQuoteScoper() {
   const [refinementText, setRefinementText]       = useState("");
   const [refinementOpen, setRefinementOpen]       = useState(false);
   const [audioClips, setAudioClips]               = useState([]);
+  const [pipelineMode, setPipelineMode]           = useState("quote"); // "quote" | "summary"
   const [transcriptData, setTranscriptData]       = useState(null);
   const [descriptionData, setDescriptionData]     = useState(null);
+  const [summaryData, setSummaryData]             = useState(null);
   const [describeTruncated, setDescribeTruncated] = useState(false);
   const [syncKey, setSyncKey]                     = useState(() => {
     const stored = loadLS(LS.syncKey, null);
@@ -751,7 +754,7 @@ export default function FBSQuoteScoper() {
   const clearAll = () => {
     setImages([]); setAudioClips([]); setPdfTruncWarnings([]);
     setTranscriptData(null); setDescriptionData(null);
-    setScopeData(null); setQuoteData(null);
+    setScopeData(null); setQuoteData(null); setSummaryData(null);
     setStage("idle"); setError("");
     setJobSummary(""); setJobDescription("");
     setRefinementText(""); setRefinementOpen(false);
@@ -783,6 +786,45 @@ export default function FBSQuoteScoper() {
       const aiComplexity = scope.complexity || "like-for-like swap";
       const quote = priceScope(scope.items, rates, aiComplexity, sitePrelims, overhead, profit, cisDeduction);
       setQuoteData(quote);
+      setStage("done");
+    } catch (e) {
+      setError(e.message);
+      setStage("error");
+    }
+  };
+
+  const runSummaryPipeline = async () => {
+    if (audioClips.length === 0) { setError("Upload a WAV or video file with audio to use Scope Summary mode."); return; }
+    setError(""); setScopeData(null); setQuoteData(null); setSummaryData(null); setTranscriptData(null); setDescriptionData(null);
+
+    try {
+      setTab("quote");
+
+      // Stage 1 — Transcribe
+      setStage("transcribing");
+      let transcript = null;
+      try {
+        const result = await callBackend("/api/transcribe", { audio: audioClips[0].b64 });
+        transcript = result.transcript || null;
+        setTranscriptData(transcript);
+      } catch (e) {
+        setError("Transcription failed: " + e.message);
+        setStage("error");
+        return;
+      }
+      if (!transcript) {
+        setError("No speech detected in the audio.");
+        setStage("error");
+        return;
+      }
+
+      // Stage 2 — Summarise
+      setStage("summarising");
+      const result = await callBackend("/api/summarise", {
+        transcript,
+        ...(jobDescription.trim() && { jobDescription: jobDescription.trim() }),
+      });
+      setSummaryData(result.summary);
       setStage("done");
     } catch (e) {
       setError(e.message);
@@ -988,9 +1030,10 @@ export default function FBSQuoteScoper() {
     text: "#E5E7EB", green: "#10B981", red: "#EF4444",
   };
 
-  const busy      = stage === "transcribing" || stage === "describing" || stage === "scoping";
-  const hasAudio  = audioClips.length > 0;
+  const busy        = stage === "transcribing" || stage === "describing" || stage === "scoping" || stage === "summarising";
+  const hasAudio    = audioClips.length > 0;
   const totalStages = hasAudio ? 3 : 2;
+  const handleRun   = () => pipelineMode === "summary" ? runSummaryPipeline() : runPipeline();
   const videoNames  = [...new Set(images.filter(i => i.source === "video").map(i => i.videoName))];
 
   return (
@@ -1062,13 +1105,31 @@ export default function FBSQuoteScoper() {
                 padding: "8px 12px", color: C.muted, fontFamily: "'DM Mono'",
                 fontSize: 11, cursor: "pointer" }}>✕ Clear</button>
           )}
-          <button onClick={runPipeline} disabled={busy}
+          {/* Mode toggle */}
+          <div style={{ display: "flex", borderRadius: 5, overflow: "hidden",
+            border: `1px solid ${C.subtle}`, flexShrink: 0 }}>
+            {[
+              { id: "quote",   label: "Full Quote" },
+              { id: "summary", label: "Scope Only" },
+            ].map(({ id, label }) => (
+              <button key={id} onClick={() => setPipelineMode(id)} disabled={busy}
+                style={{ padding: "8px 14px", border: "none", cursor: busy ? "not-allowed" : "pointer",
+                  background: pipelineMode === id ? C.amber : "transparent",
+                  color: pipelineMode === id ? "#000" : C.muted,
+                  fontFamily: "'DM Mono'", fontSize: 11, letterSpacing: "0.05em" }}>
+                {label}
+              </button>
+            ))}
+          </div>
+          <button onClick={handleRun} disabled={busy}
             style={{ background: busy ? C.subtle : C.amber, color: "#000", border: "none",
               borderRadius: 6, padding: "10px 28px", fontFamily: "'Bebas Neue'", fontSize: 16,
               letterSpacing: "0.08em", cursor: busy ? "not-allowed" : "pointer", whiteSpace: "nowrap" }}>
             {stage === "transcribing" ? "Transcribing…" :
+             stage === "summarising"  ? "Summarising…"  :
              stage === "describing"   ? "Analysing…"    :
-             stage === "scoping"      ? "Scoping…"      : "▶  Run Scope + Price"}
+             stage === "scoping"      ? "Scoping…"      :
+             pipelineMode === "summary" ? "▶  Transcribe + Summarise" : "▶  Run Scope + Price"}
           </button>
         </div>
 
@@ -1387,7 +1448,12 @@ export default function FBSQuoteScoper() {
             <div style={{ animation: "slideIn 0.2s ease" }}>
               {stage === "transcribing" && (
                 <div style={{ padding: "40px 0", textAlign: "center" }}>
-                  <Spinner label={`Stage 1/${totalStages} · Transcribing audio with Whisper…`} />
+                  <Spinner label={`Stage 1/${pipelineMode === "summary" ? 2 : totalStages} · Transcribing audio with Whisper…`} />
+                </div>
+              )}
+              {stage === "summarising" && (
+                <div style={{ padding: "40px 0", textAlign: "center" }}>
+                  <Spinner label="Stage 2/2 · Kimi K2.5 generating scope summary…" />
                 </div>
               )}
               {stage === "describing" && (
@@ -1409,6 +1475,42 @@ export default function FBSQuoteScoper() {
                 <div style={{ background: "#DC262611", border: `1px solid #DC262633`,
                   borderRadius: 6, padding: "12px 16px", color: C.red, fontSize: 13, marginBottom: 16 }}>
                   ⚠ {error}
+                </div>
+              )}
+
+              {/* ── Scope Summary output (summary mode) ── */}
+              {summaryData && stage !== "summarising" && (
+                <div style={{ marginBottom: 24, animation: "slideIn 0.2s ease" }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                    <div style={{ fontSize: 11, color: C.muted, fontFamily: "'DM Mono'",
+                      textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                      Scope of Works
+                    </div>
+                    <button onClick={() => navigator.clipboard.writeText(summaryData)}
+                      style={{ background: "transparent", border: `1px solid ${C.subtle}`,
+                        borderRadius: 4, padding: "4px 12px", color: C.muted,
+                        fontFamily: "'DM Mono'", fontSize: 11, cursor: "pointer" }}>
+                      Copy
+                    </button>
+                  </div>
+                  <pre style={{ background: "#0F1117", borderRadius: 6, padding: "16px 18px",
+                    border: `1px solid ${C.border}`, fontSize: 13, color: C.text,
+                    lineHeight: 1.75, whiteSpace: "pre-wrap", fontFamily: "'DM Mono'", margin: 0 }}>
+                    {summaryData}
+                  </pre>
+                  {transcriptData && (
+                    <details style={{ marginTop: 8 }}>
+                      <summary style={{ cursor: "pointer", fontSize: 11, color: C.muted,
+                        fontFamily: "'DM Mono'", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                        🎙 Audio Transcript
+                      </summary>
+                      <div style={{ marginTop: 6, padding: "10px 14px", background: "#0F1117",
+                        borderRadius: 5, border: `1px solid ${C.border}`,
+                        fontSize: 12, color: C.muted, lineHeight: 1.8, fontStyle: "italic" }}>
+                        {transcriptData}
+                      </div>
+                    </details>
+                  )}
                 </div>
               )}
 
