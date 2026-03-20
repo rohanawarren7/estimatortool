@@ -22,6 +22,8 @@ app.all("/api/materials-identify", require("./api/materials-identify"));
 app.all("/api/materials-source",   require("./api/materials-source"));
 app.all("/api/materials-voice",    require("./api/materials-voice"));
 app.all("/api/materials-library",  require("./api/materials-library"));
+app.all("/api/project-store",      require("./api/project-store"));
+app.all("/api/project-store/list", require("./api/project-store"));
 
 // Slack slash commands use form-encoded bodies (must come before global json middleware applies)
 app.use("/api/slack/command", express.urlencoded({ extended: false }));
