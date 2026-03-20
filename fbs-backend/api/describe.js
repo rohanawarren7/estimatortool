@@ -3,7 +3,7 @@
 // Output feeds into scope.js (Kimi K2.5) as text, keeping Kimi's context free for analysis.
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-const MODEL = "google/gemini-2.5-flash-preview";
+const MODEL = "google/gemini-2.5-flash";
 
 const DESCRIBE_PROMPT = `You are a construction site inspector analysing photos and video frames for a UK building contractor called Fallow Building Services (FBS).
 
