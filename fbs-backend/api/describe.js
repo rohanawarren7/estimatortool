@@ -1,9 +1,9 @@
-// api/describe.js — Vision stage: all frames → rich text description via Gemini 2.0 Flash
-// Gemini 2.0 Flash has a 1M token context — handles 60 frames comfortably.
+// api/describe.js — Vision stage: all frames → rich text description via Gemini 2.5 Flash
+// Gemini 2.5 Flash has a 1M token context and superior visual reasoning.
 // Output feeds into scope.js (Kimi K2.5) as text, keeping Kimi's context free for analysis.
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-const MODEL = "google/gemini-2.0-flash-001";
+const MODEL = "google/gemini-2.5-flash-preview";
 
 const DESCRIBE_PROMPT = `You are a construction site inspector analysing photos and video frames for a UK building contractor called Fallow Building Services (FBS).
 
@@ -58,7 +58,7 @@ module.exports = async function handler(req, res) {
 
   const requestBody = {
     model: MODEL,
-    max_tokens: 8000,
+    max_tokens: 12000,
     temperature: 0.3,
     messages: [{
       role: "user",
