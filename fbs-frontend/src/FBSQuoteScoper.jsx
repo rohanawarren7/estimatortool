@@ -2671,6 +2671,7 @@ export default function FBSQuoteScoper() {
         jobDescription={jobDescription}
         apiBase={VERCEL_BASE_URL || ""}
         secret={FBS_SECRET || ""}
+        syncKey={syncKey}
         initialMaterials={materialsInitial}
         onClose={() => { setShowMaterialsSourcing(false); setMaterialsInitial(null); }}
       />
