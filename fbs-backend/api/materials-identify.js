@@ -131,6 +131,7 @@ async function runIdentifyChunk({ images, scopeItems, description, jobDescriptio
       model: MODEL,
       max_tokens: MAX_TOKENS,
       temperature: 0.2,
+      response_format: { type: "json_object" },
       messages: [{ role: "user", content: contentParts }]
     })
   });
