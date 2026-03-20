@@ -1,10 +1,10 @@
-// api/scope.js — Stage 3: Site description + context → Quantity Takeoff via Kimi K2.5
-// Kimi receives rich text only (no images) — keeps its context free for analysis.
-// Option B: Kimi self-assesses job_type and complexity from visual evidence.
+// api/scope.js — Stage 3: Site description + context → Quantity Takeoff via Gemini 2.5 Flash
+// Gemini 2.5 Flash receives rich text only (no images) — keeps context free for analysis.
+// Gemini 2.5 Flash self-assesses job_type and complexity from the site description.
 // Multiplier table in the frontend owns all complexity uplift.
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-const MODEL = "moonshotai/kimi-k2.5";
+const MODEL = "google/gemini-2.5-flash-preview";
 
 const VALID_TIERS = [
   "like-for-like swap",
@@ -245,13 +245,12 @@ module.exports = async function handler(req, res) {
 
   // Shared parse + normalise logic used by both streaming and non-streaming paths
   function parseAndNormalise(raw, finishReason) {
-    console.log("Kimi raw response:", raw.slice(0, 300));
+    console.log("Gemini scope raw response:", raw.slice(0, 300));
     console.log("Finish reason:", finishReason);
 
-    // ── Strip Kimi K2.5 thinking blocks ──────────────────────────────────────
-    // Kimi K2.5 is a reasoning model. It emits <think>…</think> before the JSON.
-    // If max_tokens was too low, the block may be truncated (no closing tag) —
-    // handle both cases so we always extract the JSON portion.
+    // ── Strip any thinking blocks (safety net for reasoning variants) ─────────
+    // Some model variants emit <think>…</think> before the JSON.
+    // Stripping these ensures clean JSON extraction in all cases.
     let stripped = raw
       .replace(/<think>[\s\S]*?<\/think>/gi, "")   // complete thinking block
       .replace(/<think>[\s\S]*/gi, "")               // truncated thinking block
@@ -259,9 +258,8 @@ module.exports = async function handler(req, res) {
 
     if (!stripped && finishReason === "length") {
       throw new Error(
-        "Kimi hit token limit inside its reasoning block — response was entirely " +
-        "<think> tokens with no JSON output. This should not happen with max_tokens=16000; " +
-        "check prompt length or model availability."
+        "Model hit token limit inside reasoning block — no JSON output. " +
+        "Check prompt length or model availability."
       );
     }
 
@@ -313,7 +311,7 @@ module.exports = async function handler(req, res) {
     }
 
     if (!parsed.complexity || !VALID_TIERS.includes(parsed.complexity)) {
-      console.warn("Kimi returned unexpected complexity:", parsed.complexity, "— defaulting to 'like-for-like swap'");
+      console.warn("Unexpected complexity value:", parsed.complexity, "— defaulting to 'like-for-like swap'");
       parsed.complexity = "like-for-like swap";
     }
 
@@ -336,13 +334,14 @@ module.exports = async function handler(req, res) {
           max_tokens: 16000,
           temperature: 0.1,
           stream: true,
+          response_format: { type: "json_object" },
           messages: [{ role: "user", content: promptText }]
         }),
       });
 
       if (!response.ok) {
         const err = await response.json().catch(() => ({}));
-        res.write(`data: ${JSON.stringify({ type: "error", error: err?.error?.message || `Kimi API error ${response.status}` })}\n\n`);
+        res.write(`data: ${JSON.stringify({ type: "error", error: err?.error?.message || `Gemini API error ${response.status}` })}\n\n`);
         return res.end();
       }
 
@@ -393,13 +392,14 @@ module.exports = async function handler(req, res) {
         model: MODEL,
         max_tokens: 16000,
         temperature: 0.1,
+        response_format: { type: "json_object" },
         messages: [{ role: "user", content: promptText }]
       })
     });
 
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
-      return res.status(502).json({ error: err?.error?.message || `Kimi API error ${response.status}` });
+      return res.status(502).json({ error: err?.error?.message || `Gemini API error ${response.status}` });
     }
 
     const data = await response.json();
