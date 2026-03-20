@@ -1,15 +1,19 @@
-// api/materials-voice.js — Voice-note to Materials List
+// api/materials-voice.js — Voice-note to Materials List + plain transcription
 // POST /api/materials-voice
 // Body option A: { audio: "<base64 WAV>" }          — transcribe then parse
 // Body option B: { transcript: "<plain text>" }      — skip transcription
 // Returns: { transcript, materials: [...] }
 // The returned materials[] array is compatible with /api/materials-source.
+//
+// Also handles POST /api/transcribe (via vercel.json rewrite) for plain transcription:
+// Body: { audio: "<base64 WAV>" }
+// Returns: { transcript }
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
 
 // --------------------------------------------------------------------------
-// Transcription — Groq Whisper Large v3 Turbo (same as existing transcribe.js)
+// Transcription — Groq Whisper Large v3 Turbo
 // --------------------------------------------------------------------------
 async function transcribeAudio(audioBase64) {
   const audioBuffer = Buffer.from(audioBase64, "base64");
@@ -52,7 +56,7 @@ async function transcribeAudio(audioBase64) {
 }
 
 // --------------------------------------------------------------------------
-// Parse transcript → structured materials list  (Gemini 2.0 Flash)
+// Parse transcript → structured materials list  (Gemini 2.5 Flash)
 // --------------------------------------------------------------------------
 const PARSE_PROMPT = `You are a professional quantity surveyor for a London building contractor.
 
@@ -158,6 +162,23 @@ module.exports = async function handler(req, res) {
     return res.status(401).json({ error: "Unauthorised" });
   }
 
+  // ── Transcribe-only mode ──────────────────────────────────────────────────
+  // Handles /api/transcribe requests rewritten here via vercel.json.
+  // Identical behaviour to the old standalone transcribe.js.
+  const transcribeOnly = req.url && req.url.startsWith("/api/transcribe");
+  if (transcribeOnly) {
+    const { audio } = req.body;
+    if (!audio) return res.status(400).json({ error: "audio (base64 WAV) is required" });
+    try {
+      const transcript = await transcribeAudio(audio);
+      return res.status(200).json({ transcript: transcript.trim() });
+    } catch (err) {
+      console.error("transcribe error:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  }
+
+  // ── Materials-voice mode ──────────────────────────────────────────────────
   const { audio, transcript: incomingTranscript } = req.body;
 
   if (!audio && !incomingTranscript) {
