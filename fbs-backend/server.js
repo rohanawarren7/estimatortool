@@ -17,8 +17,10 @@ app.all("/api/scope",      require("./api/scope"));
 app.all("/api/transcribe", require("./api/transcribe"));
 app.all("/api/summarise",  require("./api/summarise"));
 app.all("/api/slack",      require("./api/slack"));
-app.all("/api/history",    require("./api/history"));
-app.all("/api",            require("./api/index"));
+app.all("/api/history",             require("./api/history"));
+app.all("/api/materials-identify",  require("./api/materials-identify"));
+app.all("/api/materials-source",    require("./api/materials-source"));
+app.all("/api",                     require("./api/index"));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`FBS API running on port ${PORT}`));

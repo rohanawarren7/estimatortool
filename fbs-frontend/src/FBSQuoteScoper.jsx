@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from "react";
+import MaterialsSourcing from "./components/MaterialsSourcing";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  CONFIGURATION — update VERCEL_BASE_URL after deployment
@@ -692,6 +693,7 @@ export default function FBSQuoteScoper() {
   const [syncKeyInput, setSyncKeyInput]           = useState("");   // for entering a key from another device
   const [streamingText, setStreamingText]         = useState("");   // live token stream during AI stages
   const [errorStage, setErrorStage]               = useState("");   // which stage failed
+  const [showMaterialsSourcing, setShowMaterialsSourcing] = useState(false);
   const fileRef         = useRef();
   const streamingBoxRef = useRef();
 
@@ -2083,6 +2085,14 @@ export default function FBSQuoteScoper() {
                           SAVE
                         </button>
                       )}
+                      {scopeData?.items?.length > 0 && (
+                        <button onClick={() => setShowMaterialsSourcing(true)}
+                          style={{ background: "#065F46", border: "none",
+                            borderRadius: 5, padding: "5px 14px", color: "#6EE7B7", fontSize: 11,
+                            fontFamily: "'DM Mono'", cursor: "pointer", letterSpacing: "0.06em" }}>
+                          SOURCE MATERIALS
+                        </button>
+                      )}
                     </div>
                   </div>
 
@@ -2572,5 +2582,18 @@ export default function FBSQuoteScoper() {
       </div>
 
     </div>
+
+    {showMaterialsSourcing && scopeData && (
+      <MaterialsSourcing
+        scopeItems={scopeData.items || []}
+        description={descriptionData || ""}
+        images={images}
+        jobRef={jobRef}
+        jobDescription={jobDescription}
+        apiBase={VERCEL_BASE_URL || ""}
+        secret={FBS_SECRET || ""}
+        onClose={() => setShowMaterialsSourcing(false)}
+      />
+    )}
   );
 }
